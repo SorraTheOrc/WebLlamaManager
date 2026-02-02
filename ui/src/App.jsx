@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom';
 import './App.css';
 
 const API_BASE = '/api';
@@ -11,29 +12,513 @@ function formatBytes(bytes) {
   return `${mb.toFixed(1)} MB`;
 }
 
-function App() {
-  const [status, setStatus] = useState(null);
+function formatUptime(ms) {
+  if (!ms) return '0s';
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  if (days > 0) return `${days}d ${hours % 24}h`;
+  if (hours > 0) return `${hours}h ${minutes % 60}m`;
+  if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+  return `${seconds}s`;
+}
+
+// WebSocket hook for real-time stats
+function useWebSocket() {
+  const [stats, setStats] = useState(null);
+  const [connected, setConnected] = useState(false);
+  const wsRef = useRef(null);
+  const reconnectTimeoutRef = useRef(null);
+
+  const connect = useCallback(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+    try {
+      wsRef.current = new WebSocket(wsUrl);
+
+      wsRef.current.onopen = () => {
+        setConnected(true);
+        console.log('[ws] Connected');
+      };
+
+      wsRef.current.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          if (message.type === 'stats') {
+            setStats(message.data);
+          }
+        } catch (e) {
+          console.error('[ws] Parse error:', e);
+        }
+      };
+
+      wsRef.current.onclose = () => {
+        setConnected(false);
+        console.log('[ws] Disconnected, reconnecting...');
+        reconnectTimeoutRef.current = setTimeout(connect, 2000);
+      };
+
+      wsRef.current.onerror = (error) => {
+        console.error('[ws] Error:', error);
+      };
+    } catch (e) {
+      console.error('[ws] Connection failed:', e);
+      reconnectTimeoutRef.current = setTimeout(connect, 2000);
+    }
+  }, []);
+
+  useEffect(() => {
+    connect();
+    return () => {
+      if (wsRef.current) wsRef.current.close();
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+    };
+  }, [connect]);
+
+  return { stats, connected };
+}
+
+// Sidebar Navigation
+function Sidebar({ stats }) {
+  const location = useLocation();
+  const isHealthy = stats?.llama?.status === 'ok';
+
+  return (
+    <nav className="sidebar">
+      <div className="sidebar-header">
+        <h1>Llama Manager</h1>
+        <div className={`status-indicator ${isHealthy ? 'healthy' : stats?.mode ? 'starting' : 'stopped'}`}>
+          <span className="status-dot" />
+          <span>{isHealthy ? 'Running' : stats?.mode ? 'Starting' : 'Stopped'}</span>
+        </div>
+      </div>
+
+      <div className="sidebar-nav">
+        <NavLink to="/" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+          <span className="nav-icon">&#x1F4CA;</span>
+          Dashboard
+        </NavLink>
+        <NavLink to="/presets" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+          <span className="nav-icon">&#x2699;</span>
+          Presets
+        </NavLink>
+        <NavLink to="/models" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+          <span className="nav-icon">&#x1F4E6;</span>
+          Models
+        </NavLink>
+        <NavLink to="/download" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+          <span className="nav-icon">&#x2B07;</span>
+          Download
+        </NavLink>
+      </div>
+
+      <div className="sidebar-footer">
+        <a
+          href={`http://${window.location.hostname}:${stats?.llama?.port || 5251}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="nav-item external"
+        >
+          <span className="nav-icon">&#x1F310;</span>
+          llama.cpp UI
+          <span className="external-icon">↗</span>
+        </a>
+      </div>
+    </nav>
+  );
+}
+
+// Stats Card Component
+function StatCard({ label, value, subValue, status, icon }) {
+  return (
+    <div className={`stat-card ${status || ''}`}>
+      {icon && <span className="stat-icon">{icon}</span>}
+      <div className="stat-content">
+        <span className="stat-value">{value}</span>
+        <span className="stat-label">{label}</span>
+        {subValue && <span className="stat-sub">{subValue}</span>}
+      </div>
+    </div>
+  );
+}
+
+// Progress Ring Component
+function ProgressRing({ value, size = 80, strokeWidth = 8, color = 'var(--accent)' }) {
+  const radius = (size - strokeWidth) / 2;
+  const circumference = radius * 2 * Math.PI;
+  const offset = circumference - (value / 100) * circumference;
+
+  return (
+    <svg width={size} height={size} className="progress-ring">
+      <circle
+        className="progress-ring-bg"
+        strokeWidth={strokeWidth}
+        fill="transparent"
+        r={radius}
+        cx={size / 2}
+        cy={size / 2}
+      />
+      <circle
+        className="progress-ring-fill"
+        strokeWidth={strokeWidth}
+        fill="transparent"
+        r={radius}
+        cx={size / 2}
+        cy={size / 2}
+        style={{
+          strokeDasharray: circumference,
+          strokeDashoffset: offset,
+          stroke: color
+        }}
+      />
+      <text x="50%" y="50%" textAnchor="middle" dy=".3em" className="progress-ring-text">
+        {Math.round(value)}%
+      </text>
+    </svg>
+  );
+}
+
+// Dashboard Page
+function Dashboard({ stats }) {
+  const [serverModels, setServerModels] = useState([]);
+  const [loading, setLoading] = useState({});
+
+  const fetchModels = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/models`);
+      const data = await res.json();
+      setServerModels(data.serverModels || []);
+    } catch (err) {
+      console.error('Failed to fetch models:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchModels();
+    const interval = setInterval(fetchModels, 10000);
+    return () => clearInterval(interval);
+  }, [fetchModels]);
+
+  const startServer = async () => {
+    setLoading(l => ({ ...l, server: true }));
+    try {
+      await fetch(`${API_BASE}/server/start`, { method: 'POST' });
+    } catch (err) {
+      console.error('Failed to start server:', err);
+    }
+    setLoading(l => ({ ...l, server: false }));
+  };
+
+  const stopServer = async () => {
+    setLoading(l => ({ ...l, server: true }));
+    try {
+      await fetch(`${API_BASE}/server/stop`, { method: 'POST' });
+    } catch (err) {
+      console.error('Failed to stop server:', err);
+    }
+    setLoading(l => ({ ...l, server: false }));
+  };
+
+  const isHealthy = stats?.llama?.status === 'ok';
+  const isSingleMode = stats?.mode === 'single';
+  const llamaPort = stats?.llama?.port || 5251;
+
+  return (
+    <div className="page dashboard">
+      <div className="page-header">
+        <h2>Dashboard</h2>
+        <div className="header-actions">
+          {isHealthy ? (
+            <button className="btn-danger" onClick={stopServer} disabled={loading.server}>
+              {loading.server ? 'Stopping...' : 'Stop Server'}
+            </button>
+          ) : (
+            <button className="btn-primary" onClick={startServer} disabled={loading.server}>
+              {loading.server ? 'Starting...' : 'Start Server'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Server Status */}
+      <section className="dashboard-section">
+        <h3>Server Status</h3>
+        <div className="status-grid">
+          <StatCard
+            label="Status"
+            value={isHealthy ? 'Running' : stats?.mode ? 'Starting' : 'Stopped'}
+            status={isHealthy ? 'success' : stats?.mode ? 'warning' : 'error'}
+            icon="&#x1F7E2;"
+          />
+          <StatCard
+            label="Mode"
+            value={isSingleMode ? 'Single Model' : 'Router (Multi)'}
+            subValue={stats?.preset?.name || null}
+            icon="&#x1F3AF;"
+          />
+          <StatCard
+            label="Loaded Models"
+            value={serverModels.length}
+            icon="&#x1F4E6;"
+          />
+          <div className="stat-card link-card">
+            <a
+              href={`http://${window.location.hostname}:${llamaPort}`}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <span className="stat-icon">&#x1F310;</span>
+              <div className="stat-content">
+                <span className="stat-value">Open llama.cpp</span>
+                <span className="stat-label">Port {llamaPort}</span>
+              </div>
+              <span className="link-arrow">↗</span>
+            </a>
+          </div>
+        </div>
+      </section>
+
+      {/* System Resources */}
+      <section className="dashboard-section">
+        <h3>System Resources</h3>
+        <div className="resources-grid">
+          <div className="resource-card">
+            <ProgressRing
+              value={stats?.cpu?.usage || 0}
+              color={stats?.cpu?.usage > 80 ? 'var(--error)' : 'var(--accent)'}
+            />
+            <div className="resource-info">
+              <span className="resource-label">CPU Usage</span>
+              <span className="resource-detail">{stats?.cpu?.cores || 0} cores</span>
+              <span className="resource-detail">Load: {stats?.cpu?.loadAvg?.[0]?.toFixed(2) || '0.00'}</span>
+            </div>
+          </div>
+
+          <div className="resource-card">
+            <ProgressRing
+              value={stats?.memory?.usage || 0}
+              color={stats?.memory?.usage > 80 ? 'var(--error)' : 'var(--success)'}
+            />
+            <div className="resource-info">
+              <span className="resource-label">Memory</span>
+              <span className="resource-detail">
+                {formatBytes(stats?.memory?.used)} / {formatBytes(stats?.memory?.total)}
+              </span>
+            </div>
+          </div>
+
+          <div className="resource-card">
+            <ProgressRing
+              value={stats?.gpu?.vram?.usage || (stats?.gpu?.vram?.used / stats?.gpu?.vram?.total * 100) || 0}
+              color="var(--warning)"
+            />
+            <div className="resource-info">
+              <span className="resource-label">VRAM</span>
+              {stats?.gpu ? (
+                <>
+                  <span className="resource-detail">
+                    {formatBytes(stats.gpu.vram?.used)} / {formatBytes(stats.gpu.vram?.total)}
+                  </span>
+                  <span className="resource-detail">Temp: {stats.gpu.temperature}°C</span>
+                </>
+              ) : (
+                <span className="resource-detail">Not available</span>
+              )}
+            </div>
+          </div>
+
+          {stats?.gpu && (
+            <div className="resource-card">
+              <ProgressRing
+                value={stats.gpu.usage || 0}
+                color="var(--accent)"
+              />
+              <div className="resource-info">
+                <span className="resource-label">GPU Usage</span>
+                <span className="resource-detail">{stats.gpu.usage?.toFixed(1) || 0}%</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* Active Models */}
+      {serverModels.length > 0 && (
+        <section className="dashboard-section">
+          <h3>Active Models</h3>
+          <div className="models-list">
+            {serverModels.map((model) => (
+              <div key={model.id} className="model-list-item">
+                <span className="model-name">{model.id}</span>
+                <span className="model-status loaded">Loaded</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Downloads */}
+      {stats?.downloads && Object.keys(stats.downloads).length > 0 && (
+        <section className="dashboard-section">
+          <h3>Active Downloads</h3>
+          <div className="downloads-list">
+            {Object.entries(stats.downloads).map(([id, info]) => (
+              <div key={id} className={`download-item ${info.status}`}>
+                <div className="download-info">
+                  <span className="download-name">{id}</span>
+                  <span className="download-status-text">
+                    {info.status === 'completed' ? 'Complete' :
+                     info.status === 'failed' ? `Failed: ${info.error}` :
+                     info.status === 'starting' ? 'Starting...' : 'Downloading...'}
+                  </span>
+                </div>
+                <div className="download-progress">
+                  <div className="progress-bar">
+                    <div className="progress-fill" style={{ width: `${info.progress}%` }} />
+                  </div>
+                  <span className="download-percent">{info.progress}%</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+// Presets Page
+function PresetsPage({ stats }) {
+  const [presets, setPresets] = useState([]);
+  const [loading, setLoading] = useState({});
+
+  const fetchPresets = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/presets`);
+      const data = await res.json();
+      setPresets(data.presets || []);
+    } catch (err) {
+      console.error('Failed to fetch presets:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchPresets();
+  }, [fetchPresets]);
+
+  const activatePreset = async (presetId) => {
+    setLoading(l => ({ ...l, [presetId]: true }));
+    try {
+      await fetch(`${API_BASE}/presets/${presetId}/activate`, { method: 'POST' });
+    } catch (err) {
+      console.error('Failed to activate preset:', err);
+    }
+    setLoading(l => ({ ...l, [presetId]: false }));
+  };
+
+  const switchToRouterMode = async () => {
+    setLoading(l => ({ ...l, router: true }));
+    try {
+      await fetch(`${API_BASE}/server/start`, { method: 'POST' });
+    } catch (err) {
+      console.error('Failed to switch to router mode:', err);
+    }
+    setLoading(l => ({ ...l, router: false }));
+  };
+
+  const isSingleMode = stats?.mode === 'single';
+  const activePreset = stats?.preset;
+  const isHealthy = stats?.llama?.status === 'ok';
+
+  return (
+    <div className="page">
+      <div className="page-header">
+        <h2>Optimized Presets</h2>
+        {isSingleMode && (
+          <span className="mode-badge single">Single Model Mode</span>
+        )}
+      </div>
+
+      <p className="page-description">
+        Pre-configured models with optimized settings. Activating a preset runs the server in single-model mode with specific parameters.
+      </p>
+
+      <div className="presets-grid">
+        {presets.map((preset) => {
+          const isActive = activePreset?.id === preset.id;
+          const isLoading = loading[preset.id];
+          const isStarting = isActive && !isHealthy;
+
+          return (
+            <div key={preset.id} className={`preset-card ${isActive ? 'active' : ''} ${isLoading ? 'loading' : ''}`}>
+              <div className="preset-header">
+                <h3>{preset.name}</h3>
+                {isActive && isHealthy && <span className="badge success">Active</span>}
+                {isStarting && <span className="badge warning">Starting...</span>}
+              </div>
+
+              <p className="preset-description">{preset.description}</p>
+
+              <div className="preset-details">
+                <div className="detail-row">
+                  <span className="detail-label">Repository</span>
+                  <span className="detail-value">{preset.repo}</span>
+                </div>
+                <div className="detail-row">
+                  <span className="detail-label">Quantization</span>
+                  <span className="detail-value quant">{preset.quantization}</span>
+                </div>
+                {preset.context > 0 && (
+                  <div className="detail-row">
+                    <span className="detail-label">Context</span>
+                    <span className="detail-value">{preset.context.toLocaleString()}</span>
+                  </div>
+                )}
+              </div>
+
+              {(isLoading || isStarting) && (
+                <div className="preset-loading">
+                  <div className="loading-spinner" />
+                  <span>{isLoading ? 'Activating...' : 'Starting server...'}</span>
+                </div>
+              )}
+
+              <div className="preset-actions">
+                {isActive ? (
+                  <button
+                    className="btn-secondary full-width"
+                    onClick={switchToRouterMode}
+                    disabled={loading.router || isStarting}
+                  >
+                    {loading.router ? 'Switching...' : 'Switch to Router Mode'}
+                  </button>
+                ) : (
+                  <button
+                    className="btn-primary full-width"
+                    onClick={() => activatePreset(preset.id)}
+                    disabled={isLoading}
+                  >
+                    {isLoading ? 'Activating...' : 'Activate'}
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Models Page
+function ModelsPage({ stats }) {
   const [serverModels, setServerModels] = useState([]);
   const [localModels, setLocalModels] = useState([]);
   const [modelsDir, setModelsDir] = useState('');
-  const [presets, setPresets] = useState([]);
   const [loading, setLoading] = useState({});
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState([]);
-  const [searching, setSearching] = useState(false);
-  const [selectedRepo, setSelectedRepo] = useState(null);
-  const [repoQuantizations, setRepoQuantizations] = useState([]);
-  const [loadingFiles, setLoadingFiles] = useState(false);
-
-  const fetchStatus = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE}/status`);
-      const data = await res.json();
-      setStatus(data);
-    } catch (err) {
-      console.error('Failed to fetch status:', err);
-    }
-  }, []);
 
   const fetchModels = useCallback(async () => {
     try {
@@ -47,71 +532,11 @@ function App() {
     }
   }, []);
 
-  const fetchPresets = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE}/presets`);
-      const data = await res.json();
-      setPresets(data.presets || []);
-    } catch (err) {
-      console.error('Failed to fetch presets:', err);
-    }
-  }, []);
-
   useEffect(() => {
-    fetchStatus();
     fetchModels();
-    fetchPresets();
-    const statusInterval = setInterval(fetchStatus, 3000);
-    const modelsInterval = setInterval(fetchModels, 10000);
-    return () => {
-      clearInterval(statusInterval);
-      clearInterval(modelsInterval);
-    };
-  }, [fetchStatus, fetchModels, fetchPresets]);
-
-  const startServer = async () => {
-    setLoading(l => ({ ...l, server: true }));
-    try {
-      await fetch(`${API_BASE}/server/start`, { method: 'POST' });
-      await fetchStatus();
-    } catch (err) {
-      console.error('Failed to start server:', err);
-    }
-    setLoading(l => ({ ...l, server: false }));
-  };
-
-  const stopServer = async () => {
-    setLoading(l => ({ ...l, server: true }));
-    try {
-      await fetch(`${API_BASE}/server/stop`, { method: 'POST' });
-      await fetchStatus();
-    } catch (err) {
-      console.error('Failed to stop server:', err);
-    }
-    setLoading(l => ({ ...l, server: false }));
-  };
-
-  const activatePreset = async (presetId) => {
-    setLoading(l => ({ ...l, [presetId]: true }));
-    try {
-      await fetch(`${API_BASE}/presets/${presetId}/activate`, { method: 'POST' });
-      await fetchStatus();
-    } catch (err) {
-      console.error('Failed to activate preset:', err);
-    }
-    setLoading(l => ({ ...l, [presetId]: false }));
-  };
-
-  const switchToRouterMode = async () => {
-    setLoading(l => ({ ...l, router: true }));
-    try {
-      await fetch(`${API_BASE}/server/start`, { method: 'POST' });
-      await fetchStatus();
-    } catch (err) {
-      console.error('Failed to switch to router mode:', err);
-    }
-    setLoading(l => ({ ...l, router: false }));
-  };
+    const interval = setInterval(fetchModels, 10000);
+    return () => clearInterval(interval);
+  }, [fetchModels]);
 
   const loadModel = async (modelName) => {
     setLoading(l => ({ ...l, [modelName]: true }));
@@ -143,11 +568,127 @@ function App() {
     setLoading(l => ({ ...l, [modelName]: false }));
   };
 
+  const getModelStatus = (modelName) => {
+    return serverModels.some(m =>
+      m.id === modelName || m.model === modelName || (m.id && m.id.includes(modelName))
+    ) ? 'loaded' : 'unloaded';
+  };
+
+  const isHealthy = stats?.llama?.status === 'ok';
+  const isSingleMode = stats?.mode === 'single';
+
+  if (isSingleMode) {
+    return (
+      <div className="page">
+        <div className="page-header">
+          <h2>Models</h2>
+        </div>
+        <div className="empty-state">
+          <p>Model management is disabled in single-model mode.</p>
+          <p className="hint">Switch to router mode from the Presets page to manage multiple models.</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="page">
+      <div className="page-header">
+        <h2>Models</h2>
+        <span className="models-dir">{modelsDir}</span>
+      </div>
+
+      {/* Loaded Models */}
+      {serverModels.length > 0 && (
+        <section className="page-section">
+          <h3>Loaded Models</h3>
+          <div className="models-grid">
+            {serverModels.map((model) => (
+              <div key={model.id} className="model-card active">
+                <div className="model-header">
+                  <h4>{model.id}</h4>
+                  <span className="badge success">Loaded</span>
+                </div>
+                <div className="model-actions">
+                  <button
+                    className="btn-secondary"
+                    onClick={() => unloadModel(model.id)}
+                    disabled={loading[model.id]}
+                  >
+                    {loading[model.id] ? 'Unloading...' : 'Unload'}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Local Models */}
+      <section className="page-section">
+        <h3>Local Models</h3>
+        {localModels.length === 0 ? (
+          <div className="empty-state">
+            <p>No models found in {modelsDir}</p>
+            <p className="hint">Download models from the Download page</p>
+          </div>
+        ) : (
+          <div className="models-grid">
+            {localModels.map((model) => {
+              const status = getModelStatus(model.name);
+              const isLoaded = status === 'loaded';
+              return (
+                <div key={model.path} className={`model-card ${isLoaded ? 'active' : ''}`}>
+                  <div className="model-header">
+                    <h4 title={model.path}>{model.name}</h4>
+                    {isLoaded && <span className="badge success">Loaded</span>}
+                  </div>
+                  <div className="model-info">
+                    <span>{formatBytes(model.size)}</span>
+                  </div>
+                  <div className="model-actions">
+                    {isLoaded ? (
+                      <button
+                        className="btn-secondary"
+                        onClick={() => unloadModel(model.name)}
+                        disabled={loading[model.name] || !isHealthy}
+                      >
+                        {loading[model.name] ? 'Unloading...' : 'Unload'}
+                      </button>
+                    ) : (
+                      <button
+                        className="btn-primary"
+                        onClick={() => loadModel(model.name)}
+                        disabled={loading[model.name] || !isHealthy}
+                      >
+                        {loading[model.name] ? 'Loading...' : 'Load'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+// Download Page
+function DownloadPage({ stats }) {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [selectedRepo, setSelectedRepo] = useState(null);
+  const [repoQuantizations, setRepoQuantizations] = useState([]);
+  const [loadingFiles, setLoadingFiles] = useState(false);
+
   const searchModels = async () => {
     if (!searchQuery.trim()) return;
     setSearching(true);
     setSelectedRepo(null);
-    setRepoFiles([]);
+    setRepoQuantizations([]);
     try {
       const res = await fetch(`${API_BASE}/search?query=${encodeURIComponent(searchQuery)}`);
       const data = await res.json();
@@ -180,351 +721,141 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repo, quantization })
       });
-      fetchStatus();
     } catch (err) {
       console.error('Failed to start download:', err);
     }
   };
 
-  // Find which models are loaded based on server models
-  const getModelStatus = (modelName) => {
-    const serverModel = serverModels.find(m =>
-      m.id === modelName || m.model === modelName || (m.id && m.id.includes(modelName))
-    );
-    if (serverModel) {
-      return serverModel.status || 'loaded';
-    }
-    return 'unloaded';
-  };
-
-  const isSingleMode = status?.mode === 'single';
-  const activePreset = status?.currentPreset;
-
   return (
-    <div className="app">
-      <header className="header">
-        <h1>Llama Manager</h1>
-        <div className="header-actions">
-          <div className="status-badge">
-            <span className={`dot ${status?.llamaHealthy ? 'healthy' : status?.llamaRunning ? 'starting' : 'stopped'}`} />
-            {status?.llamaHealthy
-              ? (isSingleMode ? `Running: ${activePreset?.name}` : 'Router Mode')
-              : status?.llamaRunning ? 'Starting...' : 'Server Stopped'}
-          </div>
-          {status?.llamaRunning && (
-            <button className="btn-danger" onClick={stopServer} disabled={loading.server}>
-              Stop
-            </button>
-          )}
+    <div className="page">
+      <div className="page-header">
+        <h2>Download Models</h2>
+      </div>
+
+      <div className="search-section">
+        <div className="search-bar">
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search HuggingFace for GGUF models..."
+            onKeyDown={(e) => e.key === 'Enter' && searchModels()}
+          />
+          <button className="btn-primary" onClick={searchModels} disabled={searching}>
+            {searching ? 'Searching...' : 'Search'}
+          </button>
         </div>
-      </header>
+      </div>
 
-      <main className="main">
-        {/* Optimized Presets Section */}
-        <section className="section">
-          <div className="section-header">
-            <h2>Optimized Presets</h2>
-            {isSingleMode && (
-              <span className="mode-badge single">Single Model Mode - Only this model available</span>
-            )}
-          </div>
-          <p className="section-description">
-            Pre-configured models with optimized settings. Activating a preset runs in single-model mode.
-          </p>
-          <div className="models-grid">
-            {presets.map((preset) => {
-              const isActive = activePreset?.id === preset.id;
-              const isLoading = loading[preset.id];
-              const isStarting = isActive && status?.llamaRunning && !status?.llamaHealthy;
-              return (
-                <div key={preset.id} className={`model-card preset-card ${isActive ? 'active' : ''} ${isLoading ? 'loading' : ''}`}>
-                  <div className="model-header">
-                    <h3>{preset.name}</h3>
-                    {isActive && status?.llamaHealthy && <span className="status-badge-small loaded">Active</span>}
-                    {isStarting && <span className="status-badge-small starting">Starting...</span>}
-                    {isLoading && <span className="status-badge-small loading">Loading...</span>}
-                  </div>
-                  <div className="model-info">
-                    <p className="preset-description">{preset.description}</p>
-                    <p><strong>Repo:</strong> {preset.repo}</p>
-                    <p><strong>Quant:</strong> {preset.quantization}</p>
-                    {preset.context > 0 && <p><strong>Context:</strong> {preset.context.toLocaleString()}</p>}
-                  </div>
-                  {(isLoading || isStarting) && (
-                    <div className="preset-loading-status">
-                      <div className="loading-spinner" />
-                      <span>{isLoading ? 'Activating preset...' : 'Starting server (downloading model if needed)...'}</span>
-                    </div>
-                  )}
-                  <div className="model-actions">
-                    {isActive ? (
-                      <button
-                        className="btn-secondary"
-                        onClick={switchToRouterMode}
-                        disabled={loading.router || isStarting}
-                      >
-                        {loading.router ? 'Switching...' : 'Switch to Router Mode'}
-                      </button>
-                    ) : (
-                      <button
-                        className="btn-primary"
-                        onClick={() => activatePreset(preset.id)}
-                        disabled={isLoading || (isSingleMode && !isActive)}
-                      >
-                        {isLoading ? 'Activating...' : 'Activate'}
-                      </button>
-                    )}
-                  </div>
+      {/* Active Downloads */}
+      {stats?.downloads && Object.keys(stats.downloads).length > 0 && (
+        <section className="page-section">
+          <h3>Active Downloads</h3>
+          <div className="downloads-list">
+            {Object.entries(stats.downloads).map(([id, info]) => (
+              <div key={id} className={`download-item ${info.status}`}>
+                <div className="download-info">
+                  <span className="download-name">{id}</span>
+                  <span className="download-status-text">
+                    {info.status === 'completed' ? 'Complete' :
+                     info.status === 'failed' ? `Failed: ${info.error}` :
+                     info.status === 'starting' ? 'Starting...' : 'Downloading...'}
+                  </span>
                 </div>
-              );
-            })}
-          </div>
-        </section>
-
-        {/* Router Mode Section - only show if in router mode or no mode set */}
-        {!isSingleMode && (
-          <>
-            {/* Mode Switch Button */}
-            {!status?.llamaRunning && (
-              <section className="section">
-                <button className="btn-primary" onClick={startServer} disabled={loading.server}>
-                  {loading.server ? 'Starting...' : 'Start in Router Mode (Multi-Model)'}
-                </button>
-              </section>
-            )}
-
-            {/* Server Models Section */}
-            {serverModels.length > 0 && (
-              <section className="section">
-                <h2>Loaded Models</h2>
-                <div className="models-grid">
-                  {serverModels.map((model) => (
-                    <div key={model.id} className="model-card active">
-                      <div className="model-header">
-                        <h3>{model.id}</h3>
-                        <span className="status-badge-small loaded">Loaded</span>
-                      </div>
-                      <div className="model-actions">
-                        <button
-                          className="btn-secondary"
-                          onClick={() => unloadModel(model.id)}
-                          disabled={loading[model.id]}
-                        >
-                          {loading[model.id] ? 'Unloading...' : 'Unload'}
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                <div className="download-progress">
+                  <div className="progress-bar">
+                    <div className="progress-fill" style={{ width: `${info.progress}%` }} />
+                  </div>
+                  <span className="download-percent">{info.progress}%</span>
                 </div>
-              </section>
-            )}
-
-            {/* Local Models Section */}
-            <section className="section">
-              <div className="section-header">
-                <h2>Local Models</h2>
-                <span className="models-dir">{modelsDir}</span>
               </div>
-
-          {localModels.length === 0 ? (
-            <div className="empty-state">
-              <p>No models found in {modelsDir}</p>
-              <p className="hint">Use the search below to download models from HuggingFace</p>
-            </div>
-          ) : (
-            <div className="models-grid">
-              {localModels.map((model) => {
-                const modelStatus = getModelStatus(model.name);
-                const isLoaded = modelStatus === 'loaded';
-                return (
-                  <div key={model.path} className={`model-card ${isLoaded ? 'active' : ''}`}>
-                    <div className="model-header">
-                      <h3 title={model.path}>{model.name}</h3>
-                      {isLoaded && <span className="status-badge-small loaded">Loaded</span>}
-                    </div>
-                    <div className="model-info">
-                      <p><strong>Size:</strong> {formatBytes(model.size)}</p>
-                    </div>
-                    <div className="model-actions">
-                      {isLoaded ? (
-                        <button
-                          className="btn-secondary"
-                          onClick={() => unloadModel(model.name)}
-                          disabled={loading[model.name] || !status?.llamaHealthy}
-                        >
-                          {loading[model.name] ? 'Unloading...' : 'Unload'}
-                        </button>
-                      ) : (
-                        <button
-                          className="btn-primary"
-                          onClick={() => loadModel(model.name)}
-                          disabled={loading[model.name] || !status?.llamaHealthy}
-                        >
-                          {loading[model.name] ? 'Loading...' : 'Load'}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+            ))}
+          </div>
         </section>
-          </>
-        )}
+      )}
 
-        {/* Activity & Downloads Section - Always visible */}
-        <section className="section activity-section">
-          <h2>Activity & Downloads</h2>
+      {/* Search Results */}
+      {searchResults.length > 0 && !selectedRepo && (
+        <section className="page-section">
+          <h3>Search Results</h3>
+          <div className="search-results">
+            {searchResults.map((result) => (
+              <div key={result.id} className="search-result" onClick={() => selectRepo(result)}>
+                <div className="result-info">
+                  <h4>{result.id}</h4>
+                  <p>{result.downloads?.toLocaleString()} downloads</p>
+                </div>
+                <span className="arrow">→</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
-          {/* Server Status */}
-          <div className="activity-status">
-            <div className={`activity-indicator ${status?.llamaHealthy ? 'healthy' : status?.llamaRunning ? 'starting' : 'stopped'}`}>
-              <span className="activity-dot" />
-              <span className="activity-text">
-                {status?.llamaHealthy
-                  ? (isSingleMode
-                      ? `Running: ${activePreset?.name} (downloading model if needed...)`
-                      : 'Router mode ready')
-                  : status?.llamaRunning
-                    ? 'Server starting... (may be downloading model)'
-                    : 'Server stopped'}
-              </span>
-            </div>
+      {/* Selected Repo */}
+      {selectedRepo && (
+        <section className="page-section">
+          <div className="repo-header">
+            <button className="btn-ghost" onClick={() => setSelectedRepo(null)}>
+              ← Back
+            </button>
+            <h3>{selectedRepo.id}</h3>
           </div>
 
-          {/* Downloads */}
-          {status?.downloads && Object.keys(status.downloads).length > 0 ? (
-            <div className="downloads-list">
-              {Object.entries(status.downloads).map(([id, info]) => (
-                <div key={id} className={`download-item ${info.status}`}>
-                  <div className="download-info">
-                    <span className="download-name">{id}</span>
-                    <span className="download-status-text">
-                      {info.status === 'completed' ? 'Complete' :
-                       info.status === 'failed' ? `Failed: ${info.error || 'Unknown error'}` :
-                       info.status === 'starting' ? 'Starting...' :
-                       'Downloading...'}
+          {loadingFiles ? (
+            <p>Loading available quantizations...</p>
+          ) : repoQuantizations.length === 0 ? (
+            <p>No GGUF files found in this repository</p>
+          ) : (
+            <div className="quant-list">
+              {repoQuantizations.map((quant) => (
+                <div key={quant.quantization} className="quant-item">
+                  <div className="quant-info">
+                    <span className="quant-badge">{quant.quantization}</span>
+                    <span className="quant-size">
+                      {formatBytes(quant.totalSize)}
+                      {quant.isSplit && ` (${quant.files.length} parts)`}
                     </span>
                   </div>
-                  <div className="download-progress">
-                    <div className="progress-bar">
-                      <div
-                        className="progress-fill"
-                        style={{ width: `${info.progress}%` }}
-                      />
-                    </div>
-                    <span className="download-percent">{info.progress}%</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="activity-empty">
-              <p>No active downloads</p>
-              <p className="hint">Downloads will appear here when you pull models from HuggingFace</p>
-            </div>
-          )}
-        </section>
-
-        {/* Search Section */}
-        <section className="section">
-          <h2>Download from HuggingFace</h2>
-          <div className="search-bar">
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search for GGUF models (e.g., llama, qwen, mistral)..."
-              onKeyDown={(e) => e.key === 'Enter' && searchModels()}
-            />
-            <button className="btn-primary" onClick={searchModels} disabled={searching}>
-              {searching ? 'Searching...' : 'Search'}
-            </button>
-          </div>
-
-          {searchResults.length > 0 && !selectedRepo && (
-            <div className="search-results">
-              {searchResults.map((result) => (
-                <div key={result.id} className="search-result" onClick={() => selectRepo(result)}>
-                  <div className="result-info">
-                    <h4>{result.id}</h4>
-                    <p>{result.downloads?.toLocaleString()} downloads</p>
-                  </div>
-                  <span className="arrow">→</span>
+                  <button
+                    className="btn-primary"
+                    onClick={() => downloadModel(selectedRepo.id, quant.quantization)}
+                  >
+                    Download
+                  </button>
                 </div>
               ))}
             </div>
           )}
-
-          {selectedRepo && (
-            <div className="repo-detail">
-              <div className="repo-header">
-                <button className="btn-ghost" onClick={() => setSelectedRepo(null)}>
-                  ← Back
-                </button>
-                <h3>{selectedRepo.id}</h3>
-              </div>
-
-              {loadingFiles ? (
-                <p>Loading available quantizations...</p>
-              ) : repoQuantizations.length === 0 ? (
-                <p>No GGUF files found in this repository</p>
-              ) : (
-                <div className="file-list">
-                  {repoQuantizations.map((quant) => (
-                    <div key={quant.quantization} className="file-item">
-                      <div className="file-info">
-                        <span className="file-name">
-                          <span className="quant-badge">{quant.quantization}</span>
-                        </span>
-                        <span className="file-meta">
-                          {formatBytes(quant.totalSize)}
-                          {quant.isSplit && ` (${quant.files.length} parts)`}
-                        </span>
-                      </div>
-                      <button
-                        className="btn-primary"
-                        onClick={() => downloadModel(selectedRepo.id, quant.quantization)}
-                      >
-                        Download
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
         </section>
-
-        {/* Server Info */}
-        <section className="section">
-          <h2>Server Info</h2>
-          <div className="info-grid">
-            <div className="info-item">
-              <span className="info-label">API Status</span>
-              <span className={`info-value ${status?.apiRunning ? 'success' : 'error'}`}>
-                {status?.apiRunning ? 'Running' : 'Offline'}
-              </span>
-            </div>
-            <div className="info-item">
-              <span className="info-label">Llama Server</span>
-              <span className={`info-value ${status?.llamaHealthy ? 'success' : 'warning'}`}>
-                {status?.llamaHealthy ? 'Healthy' : status?.llamaRunning ? 'Starting' : 'Stopped'}
-              </span>
-            </div>
-            <div className="info-item">
-              <span className="info-label">Llama Port</span>
-              <span className="info-value">{status?.llamaPort || 8080}</span>
-            </div>
-            <div className="info-item">
-              <span className="info-label">Models Directory</span>
-              <span className="info-value">{modelsDir}</span>
-            </div>
-          </div>
-        </section>
-      </main>
+      )}
     </div>
+  );
+}
+
+// Main App
+function App() {
+  const { stats, connected } = useWebSocket();
+
+  return (
+    <BrowserRouter>
+      <div className="app-layout">
+        <Sidebar stats={stats} />
+        <main className="main-content">
+          {!connected && (
+            <div className="connection-banner">
+              Reconnecting to server...
+            </div>
+          )}
+          <Routes>
+            <Route path="/" element={<Dashboard stats={stats} />} />
+            <Route path="/presets" element={<PresetsPage stats={stats} />} />
+            <Route path="/models" element={<ModelsPage stats={stats} />} />
+            <Route path="/download" element={<DownloadPage stats={stats} />} />
+          </Routes>
+        </main>
+      </div>
+    </BrowserRouter>
   );
 }
 

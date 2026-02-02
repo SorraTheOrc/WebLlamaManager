@@ -1,15 +1,21 @@
 import express from 'express';
 import cors from 'cors';
-import { spawn, exec } from 'child_process';
+import { spawn, exec, execSync } from 'child_process';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join, basename } from 'path';
+import { createServer } from 'http';
+import { WebSocketServer } from 'ws';
+import { cpus, totalmem, freemem, loadavg } from 'os';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PROJECT_ROOT = dirname(__dirname);
 
 const app = express();
+const httpServer = createServer(app);
+const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+
 app.use(cors());
 app.use(express.json());
 
@@ -113,6 +119,175 @@ function saveConfig(config) {
 }
 
 let config = loadConfig();
+
+// WebSocket stats broadcasting
+const STATS_INTERVAL = parseInt(process.env.STATS_INTERVAL) || 1000; // Default 1 second
+let statsInterval = null;
+let connectedClients = new Set();
+
+// System stats collection
+async function getSystemStats() {
+  const cpuCores = cpus();
+  const cpuUsage = cpuCores.reduce((acc, cpu) => {
+    const total = Object.values(cpu.times).reduce((a, b) => a + b, 0);
+    const idle = cpu.times.idle;
+    return acc + ((total - idle) / total) * 100;
+  }, 0) / cpuCores.length;
+
+  const totalMem = totalmem();
+  const freeMem = freemem();
+  const usedMem = totalMem - freeMem;
+  const memUsage = (usedMem / totalMem) * 100;
+
+  // Get GPU/VRAM stats from rocm-smi inside the container
+  let gpuStats = null;
+  try {
+    gpuStats = await getGpuStats();
+  } catch (e) {
+    // GPU stats not available
+  }
+
+  // Get llama.cpp specific stats if running
+  let llamaStats = null;
+  try {
+    const response = await fetch(`http://localhost:${LLAMA_PORT}/health`);
+    if (response.ok) {
+      llamaStats = await response.json();
+    }
+  } catch {
+    // Server not running
+  }
+
+  return {
+    timestamp: Date.now(),
+    cpu: {
+      usage: Math.round(cpuUsage * 10) / 10,
+      cores: cpuCores.length,
+      loadAvg: loadavg()
+    },
+    memory: {
+      total: totalMem,
+      used: usedMem,
+      free: freeMem,
+      usage: Math.round(memUsage * 10) / 10
+    },
+    gpu: gpuStats,
+    llama: llamaStats,
+    mode: currentMode,
+    preset: currentPreset ? OPTIMIZED_PRESETS[currentPreset] : null,
+    downloads: Object.fromEntries(
+      Array.from(downloadProcesses.entries()).map(([id, info]) => [
+        id,
+        { progress: info.progress, status: info.status, error: info.error }
+      ])
+    )
+  };
+}
+
+async function getGpuStats() {
+  return new Promise((resolve, reject) => {
+    const cmd = spawn('/usr/local/bin/distrobox', [
+      'enter', CONTAINER_NAME, '--',
+      'bash', '-c',
+      'rocm-smi --showmeminfo vram --showuse --showtemp --json 2>/dev/null || echo "{}"'
+    ], {
+      env: { ...process.env, PATH: '/usr/local/bin:/usr/bin:/bin' },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    let output = '';
+    cmd.stdout.on('data', (data) => {
+      output += data.toString();
+    });
+
+    cmd.on('close', (code) => {
+      try {
+        // Parse rocm-smi JSON output
+        const data = JSON.parse(output.trim() || '{}');
+        if (data.card0 || data['card0']) {
+          const card = data.card0 || data['card0'];
+          resolve({
+            temperature: parseFloat(card['Temperature (Sensor edge) (C)'] || card.temperature || 0),
+            usage: parseFloat(card['GPU use (%)'] || card.gpu_use || 0),
+            vram: {
+              total: parseInt(card['VRAM Total Memory (B)'] || 0),
+              used: parseInt(card['VRAM Total Used Memory (B)'] || 0),
+              usage: 0
+            }
+          });
+        } else {
+          // Try alternative parsing for different rocm-smi versions
+          resolve(null);
+        }
+      } catch {
+        resolve(null);
+      }
+    });
+
+    cmd.on('error', () => resolve(null));
+    setTimeout(() => resolve(null), 3000);
+  });
+}
+
+// WebSocket connection handling
+wss.on('connection', (ws) => {
+  console.log('[ws] Client connected');
+  connectedClients.add(ws);
+  startStatsBroadcast();
+
+  // Send initial stats immediately
+  getSystemStats().then(stats => {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify({ type: 'stats', data: stats }));
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('[ws] Client disconnected');
+    connectedClients.delete(ws);
+    stopStatsBroadcast();
+  });
+
+  ws.on('error', (err) => {
+    console.error('[ws] Error:', err);
+    connectedClients.delete(ws);
+    stopStatsBroadcast();
+  });
+});
+
+// Broadcast stats to all connected clients
+async function broadcastStats() {
+  if (connectedClients.size === 0) return;
+
+  try {
+    const stats = await getSystemStats();
+    const message = JSON.stringify({ type: 'stats', data: stats });
+
+    for (const client of connectedClients) {
+      if (client.readyState === client.OPEN) {
+        client.send(message);
+      }
+    }
+  } catch (err) {
+    console.error('[ws] Broadcast error:', err);
+  }
+}
+
+// Start stats broadcasting when first client connects
+function startStatsBroadcast() {
+  if (statsInterval) return;
+  statsInterval = setInterval(broadcastStats, STATS_INTERVAL);
+  console.log(`[ws] Stats broadcast started (interval: ${STATS_INTERVAL}ms)`);
+}
+
+// Stop when no clients
+function stopStatsBroadcast() {
+  if (statsInterval && connectedClients.size === 0) {
+    clearInterval(statsInterval);
+    statsInterval = null;
+    console.log('[ws] Stats broadcast stopped');
+  }
+}
 
 // Scan local models directory
 function scanLocalModels() {
@@ -697,6 +872,16 @@ app.get('/api/config', (req, res) => {
   res.json(config);
 });
 
+// Get system stats (REST endpoint for initial load)
+app.get('/api/stats', async (req, res) => {
+  try {
+    const stats = await getSystemStats();
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Catch-all for SPA routing
 app.get('*', (req, res) => {
   if (existsSync(join(UI_BUILD_PATH, 'index.html'))) {
@@ -706,11 +891,13 @@ app.get('*', (req, res) => {
   }
 });
 
-// Start the API server
-app.listen(API_PORT, '0.0.0.0', () => {
+// Start the API server with WebSocket support
+httpServer.listen(API_PORT, '0.0.0.0', () => {
   console.log(`Llama Manager API running on http://0.0.0.0:${API_PORT}`);
+  console.log(`WebSocket available at ws://0.0.0.0:${API_PORT}/ws`);
   console.log(`Models directory: ${MODELS_DIR}`);
   console.log(`Llama server will run on port ${LLAMA_PORT}`);
+  console.log(`Stats interval: ${STATS_INTERVAL}ms`);
 
   // Auto-start llama if configured
   if (config.autoStart) {
