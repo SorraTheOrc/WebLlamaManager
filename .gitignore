@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Build output
+ui/dist/
+
+# Runtime config (contains user-specific settings)
+config.json
+
+# Environment (use .env.example as template)
+.env
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db

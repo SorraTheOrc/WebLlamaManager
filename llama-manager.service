@@ -1,5 +1,5 @@
 [Unit]
-Description=Llama Manager API and Server
+Description=Llama Manager API and Multi-Model Server
 After=network.target
 
 [Service]
@@ -8,9 +8,12 @@ WorkingDirectory=/home/yolan/workspace/ai/llama-server/api
 ExecStart=/usr/bin/node server.js
 Restart=on-failure
 RestartSec=10
+
+# Configuration
 Environment=NODE_ENV=production
 Environment=API_PORT=3001
 Environment=LLAMA_PORT=8080
+Environment=MODELS_DIR=/home/yolan/models
 
 # Allow the service to manage distrobox containers
 Environment=XDG_RUNTIME_DIR=/run/user/1000

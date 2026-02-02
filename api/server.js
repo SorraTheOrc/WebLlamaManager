@@ -29,6 +29,64 @@ const LLAMA_PORT = process.env.LLAMA_PORT || 8080;
 // State
 let llamaProcess = null;
 let downloadProcesses = new Map();
+let currentMode = 'router'; // 'router' or 'single'
+let currentPreset = null;
+
+// Optimized single-model presets
+// These use specific configurations not supported in router mode
+const OPTIMIZED_PRESETS = {
+  gpt120: {
+    id: 'gpt120',
+    name: 'GPT-OSS 120B',
+    description: 'Large reasoning model with high effort mode',
+    repo: 'Unsloth/gpt-oss-120b-GGUF',
+    quantization: 'Q5_K_M',
+    context: 131072,
+    config: {
+      chatTemplateKwargs: '{"reasoning_effort": "high"}',
+      reasoningFormat: 'deepseek',
+      temp: 1.0,
+      topP: 1.0,
+      topK: 0,
+      minP: 0,
+      extraSwitches: '--jinja'
+    }
+  },
+  qwen3: {
+    id: 'qwen3',
+    name: 'Qwen3 Coder 30B-A3B',
+    description: 'Fast MoE coding model with 30B total / 3B active params',
+    repo: 'Unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF',
+    quantization: 'Q5_K_M',
+    context: 0, // Use model default
+    config: {
+      chatTemplateKwargs: '',
+      reasoningFormat: 'deepseek',
+      temp: 0.7,
+      topP: 1.0,
+      topK: 20,
+      minP: 0,
+      extraSwitches: '--jinja'
+    }
+  },
+  'qwen2.5': {
+    id: 'qwen2.5',
+    name: 'Qwen 2.5 Coder 32B',
+    description: 'Dense 32B coding model, high quality',
+    repo: 'Qwen/Qwen2.5-Coder-32B-Instruct-GGUF',
+    quantization: 'Q5_K_M',
+    context: 0,
+    config: {
+      chatTemplateKwargs: '',
+      reasoningFormat: 'deepseek',
+      temp: 0.7,
+      topP: 1.0,
+      topK: 20,
+      minP: 0,
+      extraSwitches: '--jinja'
+    }
+  }
+};
 
 // Ensure models directory exists
 if (!existsSync(MODELS_DIR)) {
@@ -40,10 +98,11 @@ function loadConfig() {
   if (existsSync(CONFIG_PATH)) {
     return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
   }
+  // Use environment variables for defaults
   const defaultConfig = {
-    autoStart: true,
-    modelsMax: 2,
-    contextSize: 8192
+    autoStart: process.env.AUTO_START !== 'false',
+    modelsMax: parseInt(process.env.MODELS_MAX) || 2,
+    contextSize: parseInt(process.env.CONTEXT_SIZE) || 8192
   };
   saveConfig(defaultConfig);
   return defaultConfig;
@@ -95,6 +154,8 @@ app.get('/api/status', async (req, res) => {
       llamaHealthy: llamaStatus.healthy,
       llamaPort: LLAMA_PORT,
       modelsDir: MODELS_DIR,
+      mode: currentMode,
+      currentPreset: currentPreset ? OPTIMIZED_PRESETS[currentPreset] : null,
       downloads: Object.fromEntries(
         Array.from(downloadProcesses.entries()).map(([id, info]) => [
           id,
@@ -109,6 +170,8 @@ app.get('/api/status', async (req, res) => {
       llamaHealthy: false,
       llamaPort: LLAMA_PORT,
       modelsDir: MODELS_DIR,
+      mode: currentMode,
+      currentPreset: currentPreset ? OPTIMIZED_PRESETS[currentPreset] : null,
       error: error.message
     });
   }
@@ -205,15 +268,94 @@ app.post('/api/models/unload', async (req, res) => {
   }
 });
 
-// Start llama server
-app.post('/api/server/start', async (req, res) => {
-  // Stop existing process if running
+// Get available presets
+app.get('/api/presets', (req, res) => {
+  res.json({
+    presets: Object.values(OPTIMIZED_PRESETS),
+    currentPreset: currentPreset,
+    mode: currentMode
+  });
+});
+
+// Helper to stop llama server
+async function stopLlamaServer() {
+  console.log('[stop] Stopping llama server...');
+
+  // First, kill the Node.js spawned process if any
   if (llamaProcess && !llamaProcess.killed) {
+    console.log('[stop] Killing spawned process...');
     llamaProcess.kill('SIGTERM');
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    if (!llamaProcess.killed) {
+      llamaProcess.kill('SIGKILL');
+    }
   }
+  llamaProcess = null;
+
+  // Kill any llama-server processes running on our port inside the container
+  // This ensures we don't have orphaned processes from previous runs
+  console.log(`[stop] Killing llama-server processes on port ${LLAMA_PORT}...`);
+
+  await new Promise((resolve) => {
+    const killCommand = `pkill -9 -f "llama-server.*--port[[:space:]]+${LLAMA_PORT}" || pkill -9 -f "llama-server.*--port ${LLAMA_PORT}" || true`;
+
+    const killProcess = spawn('/usr/local/bin/distrobox', [
+      'enter', CONTAINER_NAME, '--',
+      'bash', '-c', killCommand
+    ], {
+      cwd: PROJECT_ROOT,
+      env: { ...process.env, PATH: '/usr/local/bin:/usr/bin:/bin' },
+      stdio: 'pipe'
+    });
+
+    killProcess.on('exit', () => {
+      console.log('[stop] Kill command completed');
+      resolve();
+    });
+
+    killProcess.on('error', (err) => {
+      console.error('[stop] Kill command error:', err);
+      resolve();
+    });
+
+    // Timeout after 5 seconds
+    setTimeout(() => {
+      console.log('[stop] Kill command timeout');
+      resolve();
+    }, 5000);
+  });
+
+  // Also try to kill by port using fuser/lsof inside the container
+  await new Promise((resolve) => {
+    const fuserCommand = `fuser -k ${LLAMA_PORT}/tcp 2>/dev/null || true`;
+
+    const fuserProcess = spawn('/usr/local/bin/distrobox', [
+      'enter', CONTAINER_NAME, '--',
+      'bash', '-c', fuserCommand
+    ], {
+      cwd: PROJECT_ROOT,
+      env: { ...process.env, PATH: '/usr/local/bin:/usr/bin:/bin' },
+      stdio: 'pipe'
+    });
+
+    fuserProcess.on('exit', () => resolve());
+    fuserProcess.on('error', () => resolve());
+    setTimeout(() => resolve(), 3000);
+  });
+
+  // Give processes time to fully terminate
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  console.log('[stop] Llama server stopped');
+}
+
+// Start llama server in router mode (multi-model)
+app.post('/api/server/start', async (req, res) => {
+  await stopLlamaServer();
 
   try {
+    currentMode = 'router';
+    currentPreset = null;
+
     const startScript = join(PROJECT_ROOT, 'start-llama.sh');
     const env = {
       ...process.env,
@@ -241,8 +383,66 @@ app.post('/api/server/start', async (req, res) => {
       console.log(`llama-server exited with code ${code}`);
     });
 
-    res.json({ success: true, pid: llamaProcess.pid });
+    res.json({ success: true, mode: 'router', pid: llamaProcess.pid });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Activate an optimized preset (single-model mode)
+app.post('/api/presets/:presetId/activate', async (req, res) => {
+  const { presetId } = req.params;
+  const preset = OPTIMIZED_PRESETS[presetId];
+
+  if (!preset) {
+    return res.status(404).json({ error: `Preset '${presetId}' not found` });
+  }
+
+  await stopLlamaServer();
+
+  try {
+    currentMode = 'single';
+    currentPreset = presetId;
+
+    // Start single-model server with preset configuration
+    const startScript = join(PROJECT_ROOT, 'start-single-model.sh');
+    const env = {
+      ...process.env,
+      PRESET_ID: presetId,
+      PORT: String(LLAMA_PORT)
+    };
+
+    llamaProcess = spawn('bash', [startScript], {
+      cwd: PROJECT_ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+      detached: false
+    });
+
+    llamaProcess.stdout.on('data', (data) => {
+      console.log(`[llama] ${data}`);
+    });
+    llamaProcess.stderr.on('data', (data) => {
+      console.error(`[llama] ${data}`);
+    });
+
+    llamaProcess.on('exit', (code) => {
+      console.log(`llama-server exited with code ${code}`);
+      if (code !== 0) {
+        currentMode = 'router';
+        currentPreset = null;
+      }
+    });
+
+    res.json({
+      success: true,
+      mode: 'single',
+      preset: preset,
+      pid: llamaProcess.pid
+    });
+  } catch (error) {
+    currentMode = 'router';
+    currentPreset = null;
     res.status(500).json({ error: error.message });
   }
 });
@@ -250,30 +450,32 @@ app.post('/api/server/start', async (req, res) => {
 // Stop llama server
 app.post('/api/server/stop', async (req, res) => {
   if (!llamaProcess || llamaProcess.killed) {
+    currentMode = 'router';
+    currentPreset = null;
     return res.json({ success: true, message: 'Server not running' });
   }
 
-  llamaProcess.kill('SIGTERM');
-  await new Promise(resolve => setTimeout(resolve, 1000));
-
-  if (!llamaProcess.killed) {
-    llamaProcess.kill('SIGKILL');
-  }
+  await stopLlamaServer();
+  currentMode = 'router';
+  currentPreset = null;
 
   res.json({ success: true });
 });
 
 // Download a model from HuggingFace to ~/models
+// Automatically downloads all parts for split models
 app.post('/api/pull', async (req, res) => {
-  const { repo, filename, quantization } = req.body;
+  const { repo, quantization } = req.body;
 
   if (!repo) {
     return res.status(400).json({ error: 'Missing repo parameter' });
   }
 
-  // If filename specified, download that specific file
-  // Otherwise, search for a GGUF file matching the quantization
-  const downloadId = filename ? `${repo}/${filename}` : `${repo}:${quantization || 'Q5_K_M'}`;
+  if (!quantization) {
+    return res.status(400).json({ error: 'Missing quantization parameter' });
+  }
+
+  const downloadId = `${repo}:${quantization}`;
 
   if (downloadProcesses.has(downloadId)) {
     const existing = downloadProcesses.get(downloadId);
@@ -291,29 +493,29 @@ app.post('/api/pull', async (req, res) => {
   downloadProcesses.set(downloadId, downloadInfo);
 
   try {
-    // Build the huggingface-cli command
     // Downloads to ~/models with repo structure
     const targetDir = join(MODELS_DIR, repo.replace('/', '_'));
     mkdirSync(targetDir, { recursive: true });
 
-    let downloadCommand;
-    if (filename) {
-      // Download specific file
-      downloadCommand = `huggingface-cli download "${repo}" "${filename}" --local-dir "${targetDir}" --local-dir-use-symlinks False`;
-    } else {
-      // Download files matching quantization pattern
-      const quant = quantization || 'Q5_K_M';
-      downloadCommand = `huggingface-cli download "${repo}" --include "*${quant}*.gguf" --local-dir "${targetDir}" --local-dir-use-symlinks False`;
-    }
+    // Build pattern to match quantization (case-insensitive via shell)
+    // This will match both single files and split files (e.g., *Q5_K_M*.gguf)
+    const quant = quantization.toUpperCase();
+    // Use case-insensitive pattern by matching both cases
+    const quantLower = quantization.toLowerCase();
+    const includePattern = `*[${quant[0]}${quant[0].toLowerCase()}]${quant.slice(1)}*.gguf *[${quantLower[0]}${quantLower[0].toUpperCase()}]${quantLower.slice(1)}*.gguf`;
+
+    // Simpler approach: just use the quantization directly, HF CLI handles it
+    const downloadCommand = `huggingface-cli download "${repo}" --include "*${quant}*.gguf" "*${quantLower}*.gguf" --local-dir "${targetDir}" --local-dir-use-symlinks False`;
 
     console.log(`[download] Starting: ${downloadCommand}`);
 
-    const downloadProcess = spawn('distrobox', [
+    const downloadProcess = spawn('/usr/local/bin/distrobox', [
       'enter', CONTAINER_NAME, '--',
       'bash', '-c',
       `export HF_HUB_ENABLE_HF_TRANSFER=1 && ${downloadCommand} 2>&1`
     ], {
-      cwd: PROJECT_ROOT
+      cwd: PROJECT_ROOT,
+      env: { ...process.env, PATH: '/usr/local/bin:/usr/bin:/bin' }
     });
 
     downloadProcess.stdout.on('data', (data) => {
@@ -407,6 +609,7 @@ app.get('/api/search', async (req, res) => {
 });
 
 // Get files in a HuggingFace repo (to find quantizations)
+// Groups multi-part files together
 app.get('/api/repo/:author/:model/files', async (req, res) => {
   const { author, model } = req.params;
 
@@ -420,32 +623,63 @@ app.get('/api/repo/:author/:model/files', async (req, res) => {
 
     const files = await response.json();
 
-    // Filter to GGUF files and extract info
-    const ggufFiles = files
-      .filter(f => f.path && f.path.endsWith('.gguf'))
-      .map(f => ({
-        path: f.path,
-        size: f.size,
-        // Extract quantization from filename
-        quantization: extractQuantization(f.path)
-      }));
+    // Filter to GGUF files
+    const ggufFiles = files.filter(f => f.path && f.path.endsWith('.gguf'));
 
-    res.json({ files: ggufFiles });
+    // Group files by quantization (handling multi-part files)
+    const quantizations = new Map();
+
+    for (const file of ggufFiles) {
+      const quant = extractQuantization(file.path);
+      if (!quant) continue;
+
+      // Check if this is a split file (e.g., model-00001-of-00003.gguf)
+      const splitMatch = file.path.match(/[-_](\d{5})-of-(\d{5})\.gguf$/i);
+
+      if (!quantizations.has(quant)) {
+        quantizations.set(quant, {
+          quantization: quant,
+          files: [],
+          totalSize: 0,
+          isSplit: false,
+          totalParts: 1
+        });
+      }
+
+      const entry = quantizations.get(quant);
+      entry.files.push(file.path);
+      entry.totalSize += file.size || 0;
+
+      if (splitMatch) {
+        entry.isSplit = true;
+        entry.totalParts = parseInt(splitMatch[2]);
+      }
+    }
+
+    // Convert to array and sort by quantization name
+    const result = Array.from(quantizations.values())
+      .sort((a, b) => a.quantization.localeCompare(b.quantization));
+
+    res.json({ quantizations: result });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
 function extractQuantization(filename) {
+  // Remove split suffix first for matching
+  const cleanName = filename.replace(/[-_]\d{5}-of-\d{5}\.gguf$/i, '.gguf');
+
   const patterns = [
     /[-_](Q\d+_K(?:_[SML])?)/i,
     /[-_](IQ\d+_[A-Z]+)/i,
     /[-_](F16|F32|BF16)/i,
-    /[-_](Q\d+_0)/i
+    /[-_](Q\d+_0)/i,
+    /[-_](Q\d+)/i
   ];
 
   for (const pattern of patterns) {
-    const match = filename.match(pattern);
+    const match = cleanName.match(pattern);
     if (match) return match[1].toUpperCase();
   }
   return null;
@@ -491,18 +725,14 @@ app.listen(API_PORT, '0.0.0.0', () => {
 });
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   console.log('Received SIGTERM, shutting down...');
-  if (llamaProcess && !llamaProcess.killed) {
-    llamaProcess.kill('SIGTERM');
-  }
+  await stopLlamaServer();
   process.exit(0);
 });
 
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   console.log('Received SIGINT, shutting down...');
-  if (llamaProcess && !llamaProcess.killed) {
-    llamaProcess.kill('SIGTERM');
-  }
+  await stopLlamaServer();
   process.exit(0);
 });

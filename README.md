@@ -1,14 +1,15 @@
 # Llama Manager
 
-A systemd service with web UI for managing llama.cpp models on AMD GPUs using distrobox.
+A systemd service with web UI for managing llama.cpp in multi-model router mode on AMD GPUs using distrobox.
 
 ## Features
 
-- Web UI for model selection and management
-- HuggingFace model search and download
-- Automatic model switching
-- systemd user service for auto-start on boot
-- REST API for programmatic control
+- **Multi-model support**: Load and unload models dynamically without restarting
+- **Web UI**: Modern React interface for model management
+- **HuggingFace integration**: Search and download GGUF models directly
+- **Models stored in ~/models**: All models in one place, easy to manage
+- **systemd service**: Auto-start on boot, runs in background
+- **OpenAI-compatible API**: Use with any client that supports OpenAI API
 
 ## Requirements
 
@@ -32,55 +33,93 @@ systemctl --user start llama-manager
 # http://localhost:3001
 ```
 
-## Manual Start (Development)
+## How It Works
 
+The server runs llama.cpp in **router mode**, which means:
+
+1. Models are auto-discovered from `~/models`
+2. Multiple models can be loaded simultaneously (default: 2)
+3. Models load on-demand when first requested
+4. LRU eviction when hitting the max models limit
+5. No server restart needed to switch models
+
+### Using Models
+
+Via the web UI:
+1. Open http://localhost:3001
+2. Click "Load" on any model in the Local Models section
+3. Make API requests specifying the model name
+
+Via API:
 ```bash
-# Terminal 1: Start the API server
-cd api
-npm install
-npm run dev
+# List available models
+curl http://localhost:8080/models
 
-# Terminal 2: Start the UI dev server
-cd ui
-npm install
-npm run dev
-# Access at http://localhost:3000
+# Load a model
+curl -X POST http://localhost:8080/models/load \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen_Qwen2.5-Coder-32B-Instruct-GGUF/qwen2.5-coder-32b-instruct-q5_k_m.gguf"}'
+
+# Chat with a model
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen_Qwen2.5-Coder-32B-Instruct-GGUF/qwen2.5-coder-32b-instruct-q5_k_m.gguf",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
 ```
 
-## Architecture
+## Directory Structure
 
 ```
 llama-server/
-├── api/                    # Express API server
-│   ├── server.js           # Main API with model management
+├── api/
+│   ├── server.js           # Express API (model management, downloads)
 │   └── package.json
-├── ui/                     # React frontend
-│   ├── src/
-│   │   ├── App.jsx         # Main UI component
-│   │   ├── App.css         # Styles
-│   │   └── ...
-│   └── package.json
-├── container-start.sh      # llama.cpp start script (runs inside container)
-├── start-llama.sh          # Wrapper that enters distrobox and runs container-start.sh
-├── llama-manager.service   # systemd user service file
-├── config.json             # Model configurations (auto-generated)
+├── ui/
+│   ├── src/App.jsx         # React UI
+│   └── ...
+├── container-start.sh      # Starts llama-server in router mode (runs in container)
+├── start-llama.sh          # Wrapper that enters distrobox
+├── llama-manager.service   # systemd user service
+├── config.json             # Configuration (auto-generated)
 ├── install.sh              # Installation script
 └── uninstall.sh            # Uninstallation script
+
+~/models/                   # Your GGUF model files
+├── Qwen_Qwen2.5-Coder-32B-Instruct-GGUF/
+│   └── qwen2.5-coder-32b-instruct-q5_k_m.gguf
+├── Unsloth_Qwen3-Coder-30B-A3B-Instruct-GGUF/
+│   └── ...
+└── ...
 ```
 
 ## API Endpoints
 
+### Management API (port 3001)
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/status` | GET | Server status (running, model, health) |
-| `/api/models` | GET | List configured models |
-| `/api/models` | POST | Add new model configuration |
-| `/api/models/:id` | DELETE | Remove model configuration |
-| `/api/start` | POST | Start llama server with model |
-| `/api/stop` | POST | Stop llama server |
-| `/api/restart` | POST | Restart with current/new model |
+| `/api/status` | GET | Server status |
+| `/api/models` | GET | List local & loaded models |
+| `/api/models/load` | POST | Load a model |
+| `/api/models/unload` | POST | Unload a model |
+| `/api/server/start` | POST | Start llama server |
+| `/api/server/stop` | POST | Stop llama server |
 | `/api/pull` | POST | Download model from HuggingFace |
 | `/api/search` | GET | Search HuggingFace for GGUF models |
+| `/api/repo/:author/:model/files` | GET | List files in a HuggingFace repo |
+
+### Llama Server (port 8080)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/models` | GET | List models with status |
+| `/models/load` | POST | Load a model |
+| `/models/unload` | POST | Unload a model |
+| `/v1/chat/completions` | POST | Chat completions (OpenAI-compatible) |
+| `/v1/completions` | POST | Text completions |
+| `/health` | GET | Health check |
 
 ## Service Management
 
@@ -110,47 +149,69 @@ systemctl --user disable llama-manager
 sudo loginctl enable-linger $USER
 ```
 
-## Ports
+## Configuration
 
-- **3001**: API server and web UI
-- **8080**: llama.cpp server (OpenAI-compatible API)
-
-## Adding Models
-
-Models can be added via the web UI or by editing `config.json`:
+Edit `config.json` to change settings:
 
 ```json
 {
-  "models": {
-    "my-model": {
-      "name": "My Custom Model",
-      "repoid": "TheBloke",
-      "model": "SomeModel-GGUF",
-      "quantization": "Q5_K_M",
-      "context": 8192,
-      "temp": 0.7,
-      "topP": 1.0,
-      "topK": 20,
-      "minP": 0,
-      "extraSwitches": "--jinja"
-    }
-  },
-  "currentModel": "my-model",
-  "autoStart": true
+  "autoStart": true,      // Auto-start llama server when API starts
+  "modelsMax": 2,         // Max models loaded simultaneously
+  "contextSize": 8192     // Default context size
 }
+```
+
+Environment variables (set in systemd service or shell):
+- `MODELS_DIR`: Models directory (default: `~/models`)
+- `API_PORT`: Management API port (default: `3001`)
+- `LLAMA_PORT`: Llama server port (default: `8080`)
+- `MODELS_MAX`: Max simultaneous models (default: `2`)
+- `CONTEXT`: Context size (default: `8192`)
+
+## Adding Models
+
+### Via Web UI
+1. Go to "Download from HuggingFace" section
+2. Search for a model (e.g., "qwen coder gguf")
+3. Click on a repository to see available files
+4. Click "Download" on the quantization you want
+
+### Manually
+Place `.gguf` files directly in `~/models/`:
+```bash
+# Create a subdirectory for organization
+mkdir -p ~/models/my-model
+cp /path/to/model.gguf ~/models/my-model/
+
+# Or download with huggingface-cli
+huggingface-cli download Qwen/Qwen2.5-Coder-32B-Instruct-GGUF \
+  --include "*Q5_K_M*.gguf" \
+  --local-dir ~/models/Qwen_Qwen2.5-Coder-32B-Instruct-GGUF
 ```
 
 ## Troubleshooting
 
-### Service won't start
+### Models not appearing
+- Check that files end in `.gguf`
+- Verify they're in `~/models` or subdirectories
+- Restart the API: `systemctl --user restart llama-manager`
+
+### Server won't start
 Check logs: `journalctl --user -u llama-manager -f`
 
 ### distrobox errors
-Ensure the container is created: `distrobox list`
-If not running: `distrobox enter llama-rocm-7rc-rocwmma` to initialize
+Ensure the container exists: `distrobox list`
+If not running, initialize it: `distrobox enter llama-rocm-7rc-rocwmma`
 
 ### Permission denied
-Run: `chmod +x start-llama.sh container-start.sh`
+```bash
+chmod +x start-llama.sh container-start.sh
+```
 
 ### Service stops after logout
 Enable lingering: `sudo loginctl enable-linger $USER`
+
+### Model loading fails
+- Check GPU memory availability
+- Try reducing `modelsMax` in config.json
+- Try a smaller quantization (Q4 instead of Q5/Q6)
