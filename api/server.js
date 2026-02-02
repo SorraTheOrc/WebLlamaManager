@@ -31,6 +31,7 @@ const MODELS_DIR = process.env.MODELS_DIR || join(process.env.HOME, 'models');
 const CONTAINER_NAME = 'llama-rocm-7rc-rocwmma';
 const API_PORT = process.env.API_PORT || 3001;
 const LLAMA_PORT = process.env.LLAMA_PORT || 8080;
+const LLAMA_UI_URL = process.env.LLAMA_UI_URL || null; // Optional override for llama.cpp UI URL
 
 // State
 let llamaProcess = null;
@@ -173,6 +174,8 @@ async function getSystemStats() {
     },
     gpu: gpuStats,
     llama: llamaStats,
+    llamaPort: LLAMA_PORT,
+    llamaUiUrl: LLAMA_UI_URL,
     mode: currentMode,
     preset: currentPreset ? OPTIMIZED_PRESETS[currentPreset] : null,
     downloads: Object.fromEntries(

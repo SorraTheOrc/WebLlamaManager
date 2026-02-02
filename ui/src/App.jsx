@@ -117,7 +117,7 @@ function Sidebar({ stats }) {
 
       <div className="sidebar-footer">
         <a
-          href={`http://${window.location.hostname}:${stats?.llama?.port || 5251}`}
+          href={stats?.llamaUiUrl || `http://${window.location.hostname}:${stats?.llamaPort || 5251}`}
           target="_blank"
           rel="noopener noreferrer"
           className="nav-item external"
@@ -224,7 +224,8 @@ function Dashboard({ stats }) {
 
   const isHealthy = stats?.llama?.status === 'ok';
   const isSingleMode = stats?.mode === 'single';
-  const llamaPort = stats?.llama?.port || 5251;
+  const llamaPort = stats?.llamaPort || 5251;
+  const llamaUiUrl = stats?.llamaUiUrl || `http://${window.location.hostname}:${llamaPort}`;
 
   return (
     <div className="page dashboard">
@@ -266,14 +267,14 @@ function Dashboard({ stats }) {
           />
           <div className="stat-card link-card">
             <a
-              href={`http://${window.location.hostname}:${llamaPort}`}
+              href={llamaUiUrl}
               target="_blank"
               rel="noopener noreferrer"
             >
               <span className="stat-icon">&#x1F310;</span>
               <div className="stat-content">
                 <span className="stat-value">Open llama.cpp</span>
-                <span className="stat-label">Port {llamaPort}</span>
+                <span className="stat-label">{stats?.llamaUiUrl ? 'External' : `Port ${llamaPort}`}</span>
               </div>
               <span className="link-arrow">↗</span>
             </a>
