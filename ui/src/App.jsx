@@ -848,11 +848,13 @@ function QueryPanel({ stats }) {
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
 
+  // Compute base URL for llama.cpp API
+  const llamaBaseUrl = stats?.llamaUiUrl || `http://${window.location.hostname}:${stats?.llamaPort || 5251}`;
+
   // Fetch available models
   const fetchModels = useCallback(async () => {
     try {
-      const llamaPort = stats?.llamaPort || 5251;
-      const response = await fetch(`http://${window.location.hostname}:${llamaPort}/models`);
+      const response = await fetch(`${llamaBaseUrl}/models`);
       if (response.ok) {
         const data = await response.json();
         const modelList = data.data || data || [];
@@ -868,7 +870,7 @@ function QueryPanel({ stats }) {
     } catch (err) {
       console.error('Failed to fetch models:', err);
     }
-  }, [stats?.llamaPort, selectedModel]);
+  }, [llamaBaseUrl, selectedModel]);
 
   useEffect(() => {
     if (isOpen) {
@@ -897,8 +899,7 @@ function QueryPanel({ stats }) {
     setStreamingMessage('');
 
     try {
-      const llamaPort = stats?.llamaPort || 5251;
-      const response = await fetch(`http://${window.location.hostname}:${llamaPort}/v1/chat/completions`, {
+      const response = await fetch(`${llamaBaseUrl}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

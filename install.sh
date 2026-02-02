@@ -35,6 +35,8 @@ MODELS_DIR="${MODELS_DIR:-$HOME/models}"
 MODELS_MAX="${MODELS_MAX:-2}"
 CONTEXT_SIZE="${CONTEXT_SIZE:-8192}"
 AUTO_START="${AUTO_START:-true}"
+STATS_INTERVAL="${STATS_INTERVAL:-1000}"
+LLAMA_UI_URL="${LLAMA_UI_URL:-}"
 
 echo "=== Llama Manager Installation ==="
 echo
@@ -45,6 +47,8 @@ echo "  MODELS_DIR=$MODELS_DIR"
 echo "  MODELS_MAX=$MODELS_MAX"
 echo "  CONTEXT_SIZE=$CONTEXT_SIZE"
 echo "  AUTO_START=$AUTO_START"
+echo "  STATS_INTERVAL=$STATS_INTERVAL"
+[ -n "$LLAMA_UI_URL" ] && echo "  LLAMA_UI_URL=$LLAMA_UI_URL"
 echo
 
 # Check for Node.js
@@ -117,6 +121,8 @@ Environment=MODELS_DIR=$MODELS_DIR
 Environment=MODELS_MAX=$MODELS_MAX
 Environment=CONTEXT_SIZE=$CONTEXT_SIZE
 Environment=AUTO_START=$AUTO_START
+Environment=STATS_INTERVAL=$STATS_INTERVAL
+Environment=LLAMA_UI_URL=$LLAMA_UI_URL
 
 # Allow the service to manage distrobox containers
 Environment=XDG_RUNTIME_DIR=/run/user/$USER_ID
