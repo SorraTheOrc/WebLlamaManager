@@ -199,11 +199,14 @@ async function getSystemStats() {
 
   // Get llama.cpp specific stats if running
   let llamaStats = null;
+  let contextStats = null;
   try {
     const response = await fetch(`http://localhost:${LLAMA_PORT}/health`);
     if (response.ok) {
       llamaStats = await response.json();
     }
+    // Get context usage from loaded models
+    contextStats = await getContextStats();
   } catch {
     // Server not running
   }
@@ -223,6 +226,7 @@ async function getSystemStats() {
     },
     gpu: gpuStats,
     llama: llamaStats,
+    context: contextStats,
     llamaPort: LLAMA_PORT,
     llamaUiUrl: LLAMA_UI_URL,
     mode: currentMode,
@@ -234,6 +238,92 @@ async function getSystemStats() {
       ])
     )
   };
+}
+
+// Get context usage stats from loaded models
+async function getContextStats() {
+  try {
+    // Get list of models
+    const modelsResponse = await fetch(`http://localhost:${LLAMA_PORT}/models`);
+    if (!modelsResponse.ok) return null;
+
+    const modelsData = await modelsResponse.json();
+    const models = modelsData.data || [];
+
+    // Find loaded models and get their slot info
+    const loadedModels = models.filter(m => m.status?.value === 'loaded');
+    if (loadedModels.length === 0) return { models: [], totalContext: 0, usedContext: 0, usage: 0 };
+
+    const modelStats = [];
+    let totalContext = 0;
+    let usedContext = 0;
+
+    for (const model of loadedModels) {
+      // Extract port from args
+      const args = model.status?.args || [];
+      const portIndex = args.indexOf('--port');
+      const port = portIndex >= 0 ? parseInt(args[portIndex + 1]) : null;
+
+      // Extract ctx-size from args
+      const ctxIndex = args.indexOf('--ctx-size');
+      const configuredCtx = ctxIndex >= 0 ? parseInt(args[ctxIndex + 1]) : 0;
+
+      if (port && port > 0) {
+        try {
+          const slotsResponse = await fetch(`http://localhost:${port}/slots`, { signal: AbortSignal.timeout(2000) });
+          if (slotsResponse.ok) {
+            const slots = await slotsResponse.json();
+            // Sum up context across all slots
+            let modelTotalCtx = 0;
+            let modelUsedCtx = 0;
+
+            for (const slot of slots) {
+              modelTotalCtx += slot.n_ctx || 0;
+              // n_decoded represents tokens in the context
+              if (slot.next_token && Array.isArray(slot.next_token)) {
+                for (const nt of slot.next_token) {
+                  modelUsedCtx += nt.n_decoded || 0;
+                }
+              }
+            }
+
+            modelStats.push({
+              id: model.id,
+              port,
+              slots: slots.length,
+              totalContext: modelTotalCtx,
+              usedContext: modelUsedCtx,
+              usage: modelTotalCtx > 0 ? Math.round((modelUsedCtx / modelTotalCtx) * 1000) / 10 : 0
+            });
+
+            totalContext += modelTotalCtx;
+            usedContext += modelUsedCtx;
+          }
+        } catch {
+          // Worker might be busy or unreachable
+          modelStats.push({
+            id: model.id,
+            port,
+            slots: 0,
+            totalContext: configuredCtx,
+            usedContext: 0,
+            usage: 0,
+            error: 'unreachable'
+          });
+          totalContext += configuredCtx;
+        }
+      }
+    }
+
+    return {
+      models: modelStats,
+      totalContext,
+      usedContext,
+      usage: totalContext > 0 ? Math.round((usedContext / totalContext) * 1000) / 10 : 0
+    };
+  } catch {
+    return null;
+  }
 }
 
 // Read GTT (Graphics Translation Table) memory stats from sysfs
