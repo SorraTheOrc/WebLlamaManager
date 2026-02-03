@@ -37,6 +37,7 @@ CONTEXT_SIZE="${CONTEXT_SIZE:-8192}"
 AUTO_START="${AUTO_START:-true}"
 STATS_INTERVAL="${STATS_INTERVAL:-1000}"
 LLAMA_UI_URL="${LLAMA_UI_URL:-}"
+HF_TOKEN="${HF_TOKEN:-}"
 
 echo "=== Llama Manager Installation ==="
 echo
@@ -49,6 +50,7 @@ echo "  CONTEXT_SIZE=$CONTEXT_SIZE"
 echo "  AUTO_START=$AUTO_START"
 echo "  STATS_INTERVAL=$STATS_INTERVAL"
 [ -n "$LLAMA_UI_URL" ] && echo "  LLAMA_UI_URL=$LLAMA_UI_URL"
+[ -n "$HF_TOKEN" ] && echo "  HF_TOKEN=<set>"
 echo
 
 # Check for Node.js
@@ -123,6 +125,7 @@ Environment=CONTEXT_SIZE=$CONTEXT_SIZE
 Environment=AUTO_START=$AUTO_START
 Environment=STATS_INTERVAL=$STATS_INTERVAL
 Environment=LLAMA_UI_URL=$LLAMA_UI_URL
+Environment=HF_TOKEN=$HF_TOKEN
 
 # Allow the service to manage distrobox containers
 Environment=XDG_RUNTIME_DIR=/run/user/$USER_ID

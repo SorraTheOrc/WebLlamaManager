@@ -7,10 +7,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTAINER_NAME="llama-rocm-7rc-rocwmma"
 
 # Pass through environment variables (from systemd service or .env)
+# Note: CONTEXT passed by manager takes precedence over CONTEXT_SIZE from systemd
 export MODELS_DIR="${MODELS_DIR:-$HOME/models}"
 export MODELS_MAX="${MODELS_MAX:-2}"
-export CONTEXT="${CONTEXT_SIZE:-${CONTEXT:-8192}}"
+export CONTEXT="${CONTEXT:-${CONTEXT_SIZE:-8192}}"
 export PORT="${LLAMA_PORT:-${PORT:-8080}}"
+export NO_WARMUP="${NO_WARMUP:-}"
+export FLASH_ATTN="${FLASH_ATTN:-}"
+export GPU_LAYERS="${GPU_LAYERS:-99}"
+export HF_TOKEN="${HF_TOKEN:-}"
 
 echo "Starting llama.cpp in distrobox container: $CONTAINER_NAME"
 echo "Models directory: $MODELS_DIR"
@@ -39,5 +44,9 @@ exec $DISTROBOX enter "$CONTAINER_NAME" -- bash -c "
     export MODELS_MAX='$MODELS_MAX'
     export CONTEXT='$CONTEXT'
     export PORT='$PORT'
+    export NO_WARMUP='$NO_WARMUP'
+    export FLASH_ATTN='$FLASH_ATTN'
+    export GPU_LAYERS='$GPU_LAYERS'
+    export HF_TOKEN='$HF_TOKEN'
     cd '$SCRIPT_DIR' && ./container-start.sh
 "
