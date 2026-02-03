@@ -236,7 +236,55 @@ async function getSystemStats() {
   };
 }
 
+// Read GTT (Graphics Translation Table) memory stats from sysfs
+// This is the relevant metric for APUs with unified memory
+async function getGttStats() {
+  return new Promise((resolve) => {
+    // Try multiple card paths (card0, card1, etc.)
+    const cmd = spawn('bash', [
+      '-c',
+      `for card in /sys/class/drm/card*/device/mem_info_gtt_total; do
+        if [ -f "$card" ]; then
+          dir=$(dirname "$card")
+          total=$(cat "$dir/mem_info_gtt_total" 2>/dev/null || echo 0)
+          used=$(cat "$dir/mem_info_gtt_used" 2>/dev/null || echo 0)
+          if [ "$total" != "0" ]; then
+            echo "$total $used"
+            exit 0
+          fi
+        fi
+      done
+      echo "0 0"`
+    ], {
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    let output = '';
+    cmd.stdout.on('data', (data) => {
+      output += data.toString();
+    });
+
+    cmd.on('close', () => {
+      try {
+        const [totalStr, usedStr] = output.trim().split(' ');
+        const total = parseInt(totalStr) || 0;
+        const used = parseInt(usedStr) || 0;
+        const usage = total > 0 ? Math.round((used / total) * 1000) / 10 : 0;
+        resolve({ total, used, usage });
+      } catch {
+        resolve({ total: 0, used: 0, usage: 0 });
+      }
+    });
+
+    cmd.on('error', () => resolve({ total: 0, used: 0, usage: 0 }));
+    setTimeout(() => resolve({ total: 0, used: 0, usage: 0 }), 2000);
+  });
+}
+
 async function getGpuStats() {
+  // Get GTT stats first (important for APUs with unified memory)
+  const gttStats = await getGttStats();
+
   return new Promise((resolve, reject) => {
     const cmd = spawn('/usr/local/bin/distrobox', [
       'enter', CONTAINER_NAME, '--',
@@ -261,6 +309,11 @@ async function getGpuStats() {
           const vramTotal = parseInt(card['VRAM Total Memory (B)'] || 0);
           const vramUsed = parseInt(card['VRAM Total Used Memory (B)'] || 0);
           const vramUsage = vramTotal > 0 ? Math.round((vramUsed / vramTotal) * 1000) / 10 : 0;
+
+          // For systems with unified memory (APUs, MI300A, etc.), GTT is the primary memory for LLM inference
+          // If GTT is larger than VRAM, prefer showing GTT as it represents usable memory
+          const isAPU = gttStats.total > vramTotal;
+
           resolve({
             temperature: parseFloat(card['Temperature (Sensor edge) (C)'] || card.temperature || 0),
             usage: parseFloat(card['GPU use (%)'] || card.gpu_use || 0),
@@ -268,18 +321,53 @@ async function getGpuStats() {
               total: vramTotal,
               used: vramUsed,
               usage: vramUsage
-            }
+            },
+            gtt: gttStats,
+            isAPU
           });
         } else {
-          // Try alternative parsing for different rocm-smi versions
-          resolve(null);
+          // rocm-smi failed, but we might still have GTT stats
+          if (gttStats.total > 0) {
+            resolve({
+              temperature: 0,
+              usage: 0,
+              vram: { total: 0, used: 0, usage: 0 },
+              gtt: gttStats,
+              isAPU: true
+            });
+          } else {
+            resolve(null);
+          }
         }
       } catch {
-        resolve(null);
+        // Even if parsing fails, return GTT stats if available
+        if (gttStats.total > 0) {
+          resolve({
+            temperature: 0,
+            usage: 0,
+            vram: { total: 0, used: 0, usage: 0 },
+            gtt: gttStats,
+            isAPU: true
+          });
+        } else {
+          resolve(null);
+        }
       }
     });
 
-    cmd.on('error', () => resolve(null));
+    cmd.on('error', () => {
+      if (gttStats.total > 0) {
+        resolve({
+          temperature: 0,
+          usage: 0,
+          vram: { total: 0, used: 0, usage: 0 },
+          gtt: gttStats,
+          isAPU: true
+        });
+      } else {
+        resolve(null);
+      }
+    });
     setTimeout(() => resolve(null), 3000);
   });
 }
@@ -373,6 +461,79 @@ function scanLocalModels() {
 }
 
 // API Routes
+
+// Get settings
+app.get('/api/settings', (req, res) => {
+  res.json({
+    settings: {
+      contextSize: config.contextSize,
+      modelsMax: config.modelsMax,
+      autoStart: config.autoStart,
+      noWarmup: config.noWarmup || false,
+      flashAttn: config.flashAttn || false,
+      gpuLayers: config.gpuLayers || 99
+    },
+    // Include environment defaults for reference
+    defaults: {
+      contextSize: parseInt(process.env.CONTEXT_SIZE) || 8192,
+      modelsMax: parseInt(process.env.MODELS_MAX) || 2
+    }
+  });
+});
+
+// Update settings
+app.post('/api/settings', (req, res) => {
+  const { contextSize, modelsMax, autoStart, noWarmup, flashAttn, gpuLayers } = req.body;
+
+  // Validate and update settings
+  if (contextSize !== undefined) {
+    const size = parseInt(contextSize);
+    if (size >= 512 && size <= 262144) {
+      config.contextSize = size;
+    } else {
+      return res.status(400).json({ error: 'Context size must be between 512 and 262144' });
+    }
+  }
+
+  if (modelsMax !== undefined) {
+    const max = parseInt(modelsMax);
+    if (max >= 1 && max <= 10) {
+      config.modelsMax = max;
+    } else {
+      return res.status(400).json({ error: 'Max models must be between 1 and 10' });
+    }
+  }
+
+  if (autoStart !== undefined) {
+    config.autoStart = Boolean(autoStart);
+  }
+
+  if (noWarmup !== undefined) {
+    config.noWarmup = Boolean(noWarmup);
+  }
+
+  if (flashAttn !== undefined) {
+    config.flashAttn = Boolean(flashAttn);
+  }
+
+  if (gpuLayers !== undefined) {
+    const layers = parseInt(gpuLayers);
+    if (layers >= 0 && layers <= 999) {
+      config.gpuLayers = layers;
+    } else {
+      return res.status(400).json({ error: 'GPU layers must be between 0 and 999' });
+    }
+  }
+
+  saveConfig(config);
+  addLog('manager', `Settings updated: ${JSON.stringify(req.body)}`);
+
+  res.json({
+    success: true,
+    settings: config,
+    message: 'Settings saved. Restart the server for changes to take effect.'
+  });
+});
 
 // Get server status
 app.get('/api/status', async (req, res) => {
@@ -522,12 +683,12 @@ async function stopLlamaServer() {
   }
   llamaProcess = null;
 
-  // Kill any llama-server processes running on our port inside the container
-  // This ensures we don't have orphaned processes from previous runs
-  console.log(`[stop] Killing llama-server processes on port ${LLAMA_PORT}...`);
+  // Kill ALL llama-server processes inside the container
+  // Router mode spawns workers on dynamic ports, so we must kill by process name
+  console.log('[stop] Killing all llama-server processes...');
 
   await new Promise((resolve) => {
-    const killCommand = `pkill -9 -f "llama-server.*--port[[:space:]]+${LLAMA_PORT}" || pkill -9 -f "llama-server.*--port ${LLAMA_PORT}" || true`;
+    const killCommand = `pkill -9 -f "llama-server" || true`;
 
     const killProcess = spawn('/usr/local/bin/distrobox', [
       'enter', CONTAINER_NAME, '--',
@@ -553,6 +714,16 @@ async function stopLlamaServer() {
       console.log('[stop] Kill command timeout');
       resolve();
     }, 5000);
+  });
+
+  // Also kill any llama-server processes directly on the host
+  // (distrobox shares the host process namespace, but this ensures we catch everything)
+  await new Promise((resolve) => {
+    exec('pkill -9 -f "llama-server" || true', (err) => {
+      if (err) console.error('[stop] Host pkill error:', err.message);
+      resolve();
+    });
+    setTimeout(() => resolve(), 3000);
   });
 
   // Also try to kill by port using fuser/lsof inside the container
@@ -592,7 +763,11 @@ app.post('/api/server/start', async (req, res) => {
       MODELS_DIR,
       MODELS_MAX: String(config.modelsMax || 2),
       CONTEXT: String(config.contextSize || 8192),
-      PORT: String(LLAMA_PORT)
+      PORT: String(LLAMA_PORT),
+      NO_WARMUP: config.noWarmup ? '1' : '',
+      FLASH_ATTN: config.flashAttn ? '1' : '',
+      GPU_LAYERS: String(config.gpuLayers || 99),
+      HF_TOKEN: process.env.HF_TOKEN || ''
     };
 
     llamaProcess = spawn('bash', [startScript], {
@@ -942,6 +1117,140 @@ app.get('/api/logs', (req, res) => {
   const limit = parseInt(req.query.limit) || 100;
   const logs = logBuffer.slice(-limit);
   res.json({ logs });
+});
+
+// Helper to get container info for a process
+async function getContainerInfo(pid) {
+  return new Promise((resolve) => {
+    // Read cgroup to find container ID
+    exec(`cat /proc/${pid}/cgroup 2>/dev/null`, (err, stdout) => {
+      if (err || !stdout) {
+        resolve({ container: null, containerId: null });
+        return;
+      }
+
+      // Look for libpod (podman) container ID in cgroup
+      const match = stdout.match(/libpod-([a-f0-9]+)/);
+      if (!match) {
+        resolve({ container: null, containerId: null });
+        return;
+      }
+
+      const containerId = match[1];
+
+      // Get container name from podman
+      exec(`podman ps --filter id=${containerId.slice(0, 12)} --format "{{.Names}}" 2>/dev/null`, (err2, stdout2) => {
+        const containerName = stdout2?.trim() || null;
+        resolve({
+          container: containerName,
+          containerId: containerId.slice(0, 12)
+        });
+      });
+    });
+  });
+}
+
+// Get llama-server processes
+app.get('/api/processes', async (req, res) => {
+  try {
+    const processes = await new Promise((resolve) => {
+      // Get all llama-server processes with detailed info
+      // Filter to only actual llama-server binaries (not wrapper scripts)
+      exec('ps aux | grep -E "llama-server|llama_server" | grep -v grep', async (err, stdout) => {
+        if (err || !stdout.trim()) {
+          resolve([]);
+          return;
+        }
+
+        const lines = stdout.trim().split('\n');
+        const procs = [];
+
+        for (const line of lines) {
+          const parts = line.split(/\s+/);
+          const user = parts[0];
+          const pid = parseInt(parts[1]);
+          const cpu = parseFloat(parts[2]);
+          const mem = parseFloat(parts[3]);
+          const vsz = parseInt(parts[4]) * 1024; // Convert KB to bytes
+          const rss = parseInt(parts[5]) * 1024; // Convert KB to bytes
+          const startTime = parts[8];
+          const command = parts.slice(10).join(' ');
+
+          // Skip wrapper processes (shell scripts, podman, distrobox)
+          if (command.startsWith('/bin/sh') ||
+              command.startsWith('podman ') ||
+              command.includes('distrobox')) {
+            continue;
+          }
+
+          // Parse port from command
+          const portMatch = command.match(/--port\s+(\d+)/);
+          const port = portMatch ? parseInt(portMatch[1]) : null;
+
+          // Parse model/alias from command
+          const aliasMatch = command.match(/--alias\s+(\S+)/);
+          const hfMatch = command.match(/-hf\s+(\S+)/);
+          const modelMatch = command.match(/-m\s+(\S+)/);
+          const model = aliasMatch ? aliasMatch[1] : hfMatch ? hfMatch[1] : modelMatch ? modelMatch[1] : null;
+
+          // Parse host
+          const hostMatch = command.match(/--host\s+(\S+)/);
+          const host = hostMatch ? hostMatch[1] : '0.0.0.0';
+
+          // Get container info
+          const containerInfo = await getContainerInfo(pid);
+
+          procs.push({
+            pid,
+            user,
+            cpu,
+            mem,
+            vsz,
+            rss,
+            startTime,
+            port,
+            host,
+            model,
+            container: containerInfo.container,
+            containerId: containerInfo.containerId,
+            command: command.length > 100 ? command.slice(0, 100) + '...' : command,
+            isWorker: port !== parseInt(LLAMA_PORT)
+          });
+        }
+
+        resolve(procs);
+      });
+    });
+
+    res.json({ processes, llamaPort: parseInt(LLAMA_PORT) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Kill a specific process by PID
+app.post('/api/processes/:pid/kill', async (req, res) => {
+  const pid = parseInt(req.params.pid);
+  if (isNaN(pid)) {
+    return res.status(400).json({ error: 'Invalid PID' });
+  }
+
+  try {
+    await new Promise((resolve, reject) => {
+      exec(`kill -9 ${pid}`, (err) => {
+        if (err) {
+          reject(new Error(`Failed to kill process ${pid}`));
+        } else {
+          resolve();
+        }
+      });
+    });
+
+    addLog('manager', `Killed process ${pid}`);
+    res.json({ success: true, message: `Process ${pid} killed` });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Catch-all for SPA routing

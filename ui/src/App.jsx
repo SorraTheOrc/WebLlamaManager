@@ -134,6 +134,14 @@ function Sidebar({ stats }) {
           <span className="nav-icon">&#x1F4DC;</span>
           Logs
         </NavLink>
+        <NavLink to="/processes" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+          <span className="nav-icon">&#x1F5A5;</span>
+          Processes
+        </NavLink>
+        <NavLink to="/settings" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+          <span className="nav-icon">&#x2699;</span>
+          Settings
+        </NavLink>
       </div>
 
       <div className="sidebar-footer">
@@ -334,17 +342,29 @@ function Dashboard({ stats }) {
 
           <div className="resource-card">
             <ProgressRing
-              value={stats?.gpu?.vram?.usage || (stats?.gpu?.vram?.used / stats?.gpu?.vram?.total * 100) || 0}
+              value={stats?.gpu?.isAPU
+                ? (stats?.gpu?.gtt?.usage || 0)
+                : (stats?.gpu?.vram?.usage || 0)}
               color="var(--warning)"
             />
             <div className="resource-info">
-              <span className="resource-label">VRAM</span>
+              <span className="resource-label">
+                {stats?.gpu?.isAPU ? 'GTT' : 'VRAM'}
+              </span>
               {stats?.gpu ? (
                 <>
                   <span className="resource-detail">
-                    {formatBytes(stats.gpu.vram?.used)} / {formatBytes(stats.gpu.vram?.total)}
+                    {stats.gpu.isAPU
+                      ? `${formatBytes(stats.gpu.gtt?.used)} / ${formatBytes(stats.gpu.gtt?.total)}`
+                      : `${formatBytes(stats.gpu.vram?.used)} / ${formatBytes(stats.gpu.vram?.total)}`
+                    }
                   </span>
-                  <span className="resource-detail">Temp: {stats.gpu.temperature}°C</span>
+                  {stats.gpu.temperature > 0 && (
+                    <span className="resource-detail">Temp: {stats.gpu.temperature}°C</span>
+                  )}
+                  {stats.gpu.isAPU && (
+                    <span className="resource-detail" style={{fontSize: '0.7em', opacity: 0.7}}>Unified Memory</span>
+                  )}
                 </>
               ) : (
                 <span className="resource-detail">Not available</span>
@@ -956,6 +976,420 @@ function LogsPage({ logs, clearLogs }) {
   );
 }
 
+// Processes Page
+function ProcessesPage() {
+  const [processes, setProcesses] = useState([]);
+  const [llamaPort, setLlamaPort] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [killing, setKilling] = useState({});
+
+  const fetchProcesses = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/processes`);
+      const data = await res.json();
+      setProcesses(data.processes || []);
+      setLlamaPort(data.llamaPort);
+    } catch (err) {
+      console.error('Failed to fetch processes:', err);
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    fetchProcesses();
+    const interval = setInterval(fetchProcesses, 2000);
+    return () => clearInterval(interval);
+  }, [fetchProcesses]);
+
+  const killProcess = async (pid) => {
+    if (!confirm(`Kill process ${pid}?`)) return;
+
+    setKilling(k => ({ ...k, [pid]: true }));
+    try {
+      await fetch(`${API_BASE}/processes/${pid}/kill`, { method: 'POST' });
+      await fetchProcesses();
+    } catch (err) {
+      console.error('Failed to kill process:', err);
+    }
+    setKilling(k => ({ ...k, [pid]: false }));
+  };
+
+  const formatMemory = (bytes) => {
+    if (!bytes) return '-';
+    const mb = bytes / (1024 * 1024);
+    if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
+    return `${mb.toFixed(0)} MB`;
+  };
+
+  const mainProcess = processes.find(p => p.port === llamaPort);
+  const workerProcesses = processes.filter(p => p.port !== llamaPort);
+
+  return (
+    <div className="page processes-page">
+      <div className="page-header">
+        <h2>Server Processes</h2>
+        <button className="btn-secondary" onClick={fetchProcesses}>
+          Refresh
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="empty-state">
+          <p>Loading processes...</p>
+        </div>
+      ) : processes.length === 0 ? (
+        <div className="empty-state">
+          <p>No llama-server processes running</p>
+          <p className="hint">Start the server from the Dashboard</p>
+        </div>
+      ) : (
+        <>
+          {/* Main Router Process */}
+          {mainProcess && (
+            <section className="page-section">
+              <h3>Router Process (Port {llamaPort})</h3>
+              <div className="process-card main">
+                <div className="process-header">
+                  <span className="process-pid">PID {mainProcess.pid}</span>
+                  <span className="process-badge router">Router</span>
+                </div>
+                {mainProcess.container && (
+                  <div className="process-container">
+                    <span className="container-icon">&#x1F4E6;</span>
+                    <span className="container-name">{mainProcess.container}</span>
+                    <span className="container-id">{mainProcess.containerId}</span>
+                  </div>
+                )}
+                <div className="process-stats">
+                  <div className="process-stat">
+                    <span className="stat-label">CPU</span>
+                    <span className="stat-value">{mainProcess.cpu.toFixed(1)}%</span>
+                  </div>
+                  <div className="process-stat">
+                    <span className="stat-label">Memory</span>
+                    <span className="stat-value">{mainProcess.mem.toFixed(1)}%</span>
+                  </div>
+                  <div className="process-stat">
+                    <span className="stat-label">RSS</span>
+                    <span className="stat-value">{formatMemory(mainProcess.rss)}</span>
+                  </div>
+                  <div className="process-stat">
+                    <span className="stat-label">Started</span>
+                    <span className="stat-value">{mainProcess.startTime}</span>
+                  </div>
+                </div>
+                {mainProcess.model && (
+                  <div className="process-model">
+                    <span className="model-label">Model:</span>
+                    <span className="model-name">{mainProcess.model}</span>
+                  </div>
+                )}
+                <div className="process-command" title={mainProcess.command}>
+                  {mainProcess.command}
+                </div>
+                <div className="process-actions">
+                  <button
+                    className="btn-danger btn-small"
+                    onClick={() => killProcess(mainProcess.pid)}
+                    disabled={killing[mainProcess.pid]}
+                  >
+                    {killing[mainProcess.pid] ? 'Killing...' : 'Kill'}
+                  </button>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* Worker Processes */}
+          {workerProcesses.length > 0 && (
+            <section className="page-section">
+              <h3>Worker Processes ({workerProcesses.length})</h3>
+              <p className="section-hint">Workers handle individual model instances in router mode</p>
+              <div className="processes-grid">
+                {workerProcesses.map(proc => (
+                  <div key={proc.pid} className="process-card worker">
+                    <div className="process-header">
+                      <span className="process-pid">PID {proc.pid}</span>
+                      {proc.port && <span className="process-port">:{proc.port}</span>}
+                      <span className="process-badge worker">Worker</span>
+                    </div>
+                    {proc.container && (
+                      <div className="process-container compact">
+                        <span className="container-icon">&#x1F4E6;</span>
+                        <span className="container-name">{proc.container}</span>
+                      </div>
+                    )}
+                    <div className="process-stats">
+                      <div className="process-stat">
+                        <span className="stat-label">CPU</span>
+                        <span className="stat-value">{proc.cpu.toFixed(1)}%</span>
+                      </div>
+                      <div className="process-stat">
+                        <span className="stat-label">Mem</span>
+                        <span className="stat-value">{proc.mem.toFixed(1)}%</span>
+                      </div>
+                      <div className="process-stat">
+                        <span className="stat-label">RSS</span>
+                        <span className="stat-value">{formatMemory(proc.rss)}</span>
+                      </div>
+                    </div>
+                    {proc.model && (
+                      <div className="process-model">
+                        <span className="model-name" title={proc.model}>{proc.model}</span>
+                      </div>
+                    )}
+                    <div className="process-actions">
+                      <button
+                        className="btn-danger btn-small"
+                        onClick={() => killProcess(proc.pid)}
+                        disabled={killing[proc.pid]}
+                      >
+                        {killing[proc.pid] ? '...' : 'Kill'}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* Summary */}
+          <section className="page-section">
+            <h3>Summary</h3>
+            <div className="process-summary">
+              <div className="summary-item">
+                <span className="summary-label">Total Processes</span>
+                <span className="summary-value">{processes.length}</span>
+              </div>
+              <div className="summary-item">
+                <span className="summary-label">Total CPU</span>
+                <span className="summary-value">
+                  {processes.reduce((sum, p) => sum + p.cpu, 0).toFixed(1)}%
+                </span>
+              </div>
+              <div className="summary-item">
+                <span className="summary-label">Total Memory</span>
+                <span className="summary-value">
+                  {formatMemory(processes.reduce((sum, p) => sum + p.rss, 0))}
+                </span>
+              </div>
+            </div>
+          </section>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Settings Page
+function SettingsPage() {
+  const [settings, setSettings] = useState(null);
+  const [defaults, setDefaults] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState(null);
+
+  const fetchSettings = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/settings`);
+      const data = await res.json();
+      setSettings(data.settings);
+      setDefaults(data.defaults);
+    } catch (err) {
+      console.error('Failed to fetch settings:', err);
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    fetchSettings();
+  }, [fetchSettings]);
+
+  const saveSettings = async () => {
+    setSaving(true);
+    setMessage(null);
+    try {
+      const res = await fetch(`${API_BASE}/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings)
+      });
+      const data = await res.json();
+      if (data.success) {
+        setMessage({ type: 'success', text: data.message });
+      } else {
+        setMessage({ type: 'error', text: data.error });
+      }
+    } catch (err) {
+      setMessage({ type: 'error', text: 'Failed to save settings' });
+    }
+    setSaving(false);
+  };
+
+  const restartServer = async () => {
+    setMessage({ type: 'info', text: 'Restarting server...' });
+    try {
+      await fetch(`${API_BASE}/server/stop`, { method: 'POST' });
+      await new Promise(r => setTimeout(r, 2000));
+      await fetch(`${API_BASE}/server/start`, { method: 'POST' });
+      setMessage({ type: 'success', text: 'Server restarted with new settings' });
+    } catch (err) {
+      setMessage({ type: 'error', text: 'Failed to restart server' });
+    }
+  };
+
+  const updateSetting = (key, value) => {
+    setSettings(s => ({ ...s, [key]: value }));
+  };
+
+  if (loading) {
+    return (
+      <div className="page">
+        <div className="page-header">
+          <h2>Settings</h2>
+        </div>
+        <div className="empty-state">
+          <p>Loading settings...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="page settings-page">
+      <div className="page-header">
+        <h2>Settings</h2>
+        <div className="header-actions">
+          <button className="btn-secondary" onClick={restartServer}>
+            Restart Server
+          </button>
+          <button className="btn-primary" onClick={saveSettings} disabled={saving}>
+            {saving ? 'Saving...' : 'Save Settings'}
+          </button>
+        </div>
+      </div>
+
+      {message && (
+        <div className={`settings-message ${message.type}`}>
+          {message.text}
+        </div>
+      )}
+
+      <section className="page-section">
+        <h3>Model Loading</h3>
+        <div className="settings-grid">
+          <div className="setting-item">
+            <label htmlFor="contextSize">Context Size</label>
+            <p className="setting-hint">
+              Maximum context window size. Larger values use more VRAM and take longer to warm up.
+              Default: {defaults?.contextSize?.toLocaleString() || '8192'}
+            </p>
+            <select
+              id="contextSize"
+              value={settings?.contextSize || 8192}
+              onChange={(e) => updateSetting('contextSize', parseInt(e.target.value))}
+            >
+              <option value={2048}>2,048 (Fast)</option>
+              <option value={4096}>4,096</option>
+              <option value={8192}>8,192</option>
+              <option value={16384}>16,384</option>
+              <option value={32768}>32,768</option>
+              <option value={65536}>65,536</option>
+              <option value={131072}>131,072 (Slow warmup)</option>
+              <option value={262144}>262,144 (Very slow)</option>
+            </select>
+          </div>
+
+          <div className="setting-item">
+            <label htmlFor="modelsMax">Max Loaded Models</label>
+            <p className="setting-hint">
+              Maximum number of models to keep loaded simultaneously in router mode.
+            </p>
+            <select
+              id="modelsMax"
+              value={settings?.modelsMax || 2}
+              onChange={(e) => updateSetting('modelsMax', parseInt(e.target.value))}
+            >
+              {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="setting-item">
+            <label htmlFor="gpuLayers">GPU Layers</label>
+            <p className="setting-hint">
+              Number of layers to offload to GPU. Use 99 for full GPU offload.
+            </p>
+            <input
+              type="number"
+              id="gpuLayers"
+              value={settings?.gpuLayers || 99}
+              onChange={(e) => updateSetting('gpuLayers', parseInt(e.target.value))}
+              min={0}
+              max={999}
+            />
+          </div>
+        </div>
+      </section>
+
+      <section className="page-section">
+        <h3>Performance Options</h3>
+        <div className="settings-grid">
+          <div className="setting-item checkbox">
+            <label>
+              <input
+                type="checkbox"
+                checked={settings?.noWarmup || false}
+                onChange={(e) => updateSetting('noWarmup', e.target.checked)}
+              />
+              <span>Skip Warmup</span>
+            </label>
+            <p className="setting-hint">
+              Skip model warmup on load. Faster startup but first inference may be slower.
+            </p>
+          </div>
+
+          <div className="setting-item checkbox">
+            <label>
+              <input
+                type="checkbox"
+                checked={settings?.flashAttn || false}
+                onChange={(e) => updateSetting('flashAttn', e.target.checked)}
+              />
+              <span>Flash Attention</span>
+            </label>
+            <p className="setting-hint">
+              Enable flash attention for faster inference (requires compatible GPU).
+            </p>
+          </div>
+
+          <div className="setting-item checkbox">
+            <label>
+              <input
+                type="checkbox"
+                checked={settings?.autoStart || false}
+                onChange={(e) => updateSetting('autoStart', e.target.checked)}
+              />
+              <span>Auto-Start Server</span>
+            </label>
+            <p className="setting-hint">
+              Automatically start the llama server when the manager starts.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section className="page-section">
+        <h3>Current Configuration</h3>
+        <pre className="settings-preview">
+          {JSON.stringify(settings, null, 2)}
+        </pre>
+      </section>
+    </div>
+  );
+}
+
 // Query Panel Component
 function QueryPanel({ stats }) {
   const [isOpen, setIsOpen] = useState(false);
@@ -1187,6 +1621,8 @@ function App() {
             <Route path="/models" element={<ModelsPage stats={stats} />} />
             <Route path="/download" element={<DownloadPage stats={stats} />} />
             <Route path="/logs" element={<LogsPage logs={logs} clearLogs={clearLogs} />} />
+            <Route path="/processes" element={<ProcessesPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
           </Routes>
         </main>
         <QueryPanel stats={stats} />
