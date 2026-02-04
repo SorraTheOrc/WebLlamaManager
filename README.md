@@ -21,12 +21,50 @@ A systemd service with web UI for managing llama.cpp in multi-model router mode 
 
 ## Screenshots
 
-<!-- Add screenshots here -->
-| Dashboard | Models | Chat |
-|-----------|--------|------|
-| ![Dashboard](docs/screenshots/dashboard.png) | ![Models](docs/screenshots/models.png) | ![Chat](docs/screenshots/chat.png) |
+<details>
+<summary><strong>Dashboard</strong> - Server status, system resources, and performance analytics</summary>
 
-> Screenshots coming soon. Run the app at http://localhost:3001 to see it in action.
+![Dashboard](docs/screenshots/dashboard.png)
+</details>
+
+<details>
+<summary><strong>Chat</strong> - Multi-conversation chat with streaming responses</summary>
+
+![Chat](docs/screenshots/chat.png)
+</details>
+
+<details>
+<summary><strong>Models</strong> - Load, unload, and manage local models</summary>
+
+![Models](docs/screenshots/models.png)
+</details>
+
+<details>
+<summary><strong>Presets</strong> - Optimized configurations for specific models</summary>
+
+![Presets](docs/screenshots/presets.png)
+</details>
+
+<details>
+<summary><strong>Download</strong> - Search and download models from HuggingFace</summary>
+
+![Download Search](docs/screenshots/download-search.png)
+![Download Files](docs/screenshots/download-files.png)
+</details>
+
+<details>
+<summary><strong>Logs & Processes</strong> - Real-time server logs and process monitoring</summary>
+
+![Logs](docs/screenshots/logs.png)
+![Processes](docs/screenshots/processes.png)
+</details>
+
+<details>
+<summary><strong>Documentation</strong> - In-app docs and API reference</summary>
+
+![Docs](docs/screenshots/docs.png)
+![API Docs](docs/screenshots/api-docs-openai.png)
+</details>
 
 ## Requirements
 

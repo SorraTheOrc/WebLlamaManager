@@ -1,18 +1,20 @@
 # Screenshots
 
-Add screenshots of the Llama Manager UI here.
+UI screenshots for Llama Manager documentation.
 
-## Recommended Screenshots
+## Files
 
-- `dashboard.png` - Main dashboard with server status and stats
-- `models.png` - Models page showing local models with aliases
-- `chat.png` - Chat interface with conversation sidebar
-- `api-docs.png` - API documentation page
-- `docs.png` - In-app documentation page
-- `settings.png` - Settings and presets page
-
-## Taking Screenshots
-
-Use your browser or screenshot tool to capture the UI at http://localhost:3001.
-
-Recommended size: 1200x800 or similar aspect ratio.
+| File | Description |
+|------|-------------|
+| `dashboard.png` | Main dashboard with server status and analytics |
+| `chat.png` | Chat interface with conversation sidebar |
+| `models.png` | Models page showing loaded and local models |
+| `presets.png` | Optimized presets for single-model mode |
+| `download-search.png` | HuggingFace model search results |
+| `download-files.png` | Model file selection with quantizations |
+| `logs.png` | Server logs viewer |
+| `processes.png` | Running processes and worker info |
+| `docs.png` | In-app documentation overview |
+| `docs-opencode.png` | OpenCode setup documentation |
+| `api-docs.png` | API documentation - Manager API |
+| `api-docs-openai.png` | API documentation - OpenAI compatible API |
