@@ -1,0 +1,637 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Llama Manager API",
+    "description": "API for managing llama.cpp inference servers, models, and monitoring system resources. Includes OpenAI-compatible endpoints for chat completions.",
+    "version": "1.0.0",
+    "contact": {
+      "name": "Llama Manager"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:5250",
+      "description": "Local development server"
+    }
+  ],
+  "paths": {
+    "/api/status": {
+      "get": {
+        "operationId": "getStatus",
+        "summary": "Get server status",
+        "description": "Returns the current status of the Llama Manager and llama.cpp server",
+        "tags": ["Server"],
+        "responses": {
+          "200": {
+            "description": "Server status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/stats": {
+      "get": {
+        "operationId": "getStats",
+        "summary": "Get system statistics",
+        "description": "Returns CPU, memory, GPU, and context usage statistics",
+        "tags": ["Monitoring"],
+        "responses": {
+          "200": {
+            "description": "System statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemStats"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/analytics": {
+      "get": {
+        "operationId": "getAnalytics",
+        "summary": "Get time-series analytics",
+        "description": "Returns historical data for temperature, power, memory, and token generation",
+        "tags": ["Monitoring"],
+        "parameters": [
+          {
+            "name": "minutes",
+            "in": "query",
+            "description": "Minutes of historical data to retrieve",
+            "schema": {
+              "type": "integer",
+              "default": 5
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Analytics data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Analytics"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/models": {
+      "get": {
+        "operationId": "getModels",
+        "summary": "List models",
+        "description": "Returns all local and server-loaded models",
+        "tags": ["Models"],
+        "responses": {
+          "200": {
+            "description": "Model list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/models/load": {
+      "post": {
+        "operationId": "loadModel",
+        "summary": "Load a model",
+        "description": "Load a model into the llama.cpp server",
+        "tags": ["Models"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model"],
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "description": "Model name or path to load"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Model loaded successfully"
+          }
+        }
+      }
+    },
+    "/api/models/unload": {
+      "post": {
+        "operationId": "unloadModel",
+        "summary": "Unload a model",
+        "description": "Unload a model from the llama.cpp server",
+        "tags": ["Models"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model"],
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "description": "Model ID to unload"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Model unloaded successfully"
+          }
+        }
+      }
+    },
+    "/api/server/start": {
+      "post": {
+        "operationId": "startServer",
+        "summary": "Start llama server",
+        "description": "Start the llama.cpp server in router mode",
+        "tags": ["Server"],
+        "responses": {
+          "200": {
+            "description": "Server started"
+          }
+        }
+      }
+    },
+    "/api/server/stop": {
+      "post": {
+        "operationId": "stopServer",
+        "summary": "Stop llama server",
+        "description": "Stop the llama.cpp server",
+        "tags": ["Server"],
+        "responses": {
+          "200": {
+            "description": "Server stopped"
+          }
+        }
+      }
+    },
+    "/api/settings": {
+      "get": {
+        "operationId": "getSettings",
+        "summary": "Get settings",
+        "description": "Get current server settings",
+        "tags": ["Settings"],
+        "responses": {
+          "200": {
+            "description": "Current settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "updateSettings",
+        "summary": "Update settings",
+        "description": "Update server settings",
+        "tags": ["Settings"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Settings updated"
+          }
+        }
+      }
+    },
+    "/api/presets": {
+      "get": {
+        "operationId": "getPresets",
+        "summary": "List presets",
+        "description": "List available optimized model presets",
+        "tags": ["Presets"],
+        "responses": {
+          "200": {
+            "description": "Preset list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PresetList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/presets/{presetId}/activate": {
+      "post": {
+        "operationId": "activatePreset",
+        "summary": "Activate a preset",
+        "description": "Activate an optimized preset (switches to single-model mode)",
+        "tags": ["Presets"],
+        "parameters": [
+          {
+            "name": "presetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Preset ID (e.g., gpt120, qwen3, qwen2.5)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Preset activated"
+          }
+        }
+      }
+    },
+    "/api/search": {
+      "get": {
+        "operationId": "searchModels",
+        "summary": "Search HuggingFace",
+        "description": "Search HuggingFace for GGUF models",
+        "tags": ["Download"],
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Search query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResults"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pull": {
+      "post": {
+        "operationId": "downloadModel",
+        "summary": "Download model",
+        "description": "Download a model from HuggingFace",
+        "tags": ["Download"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["repo"],
+                "properties": {
+                  "repo": {
+                    "type": "string",
+                    "description": "HuggingFace repo ID (e.g., Qwen/Qwen2.5-Coder-32B-Instruct-GGUF)"
+                  },
+                  "quantization": {
+                    "type": "string",
+                    "description": "Quantization to download (e.g., Q5_K_M)"
+                  },
+                  "filename": {
+                    "type": "string",
+                    "description": "Specific filename to download"
+                  },
+                  "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern for files to download"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Download started"
+          }
+        }
+      }
+    },
+    "/api/processes": {
+      "get": {
+        "operationId": "getProcesses",
+        "summary": "List processes",
+        "description": "List running llama-server processes",
+        "tags": ["Monitoring"],
+        "responses": {
+          "200": {
+            "description": "Process list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/logs": {
+      "get": {
+        "operationId": "getLogs",
+        "summary": "Get logs",
+        "description": "Get server logs",
+        "tags": ["Monitoring"],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 100
+            },
+            "description": "Maximum logs to return"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Log entries"
+          }
+        }
+      }
+    },
+    "/api/v1/models": {
+      "get": {
+        "operationId": "listModelsOpenAI",
+        "summary": "List models (OpenAI)",
+        "description": "OpenAI-compatible endpoint to list available models",
+        "tags": ["OpenAI API"],
+        "responses": {
+          "200": {
+            "description": "Model list"
+          }
+        }
+      }
+    },
+    "/api/v1/chat/completions": {
+      "post": {
+        "operationId": "chatCompletions",
+        "summary": "Chat completions",
+        "description": "OpenAI-compatible chat completions endpoint. Supports streaming.",
+        "tags": ["OpenAI API"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatCompletionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Chat completion response"
+          }
+        }
+      }
+    },
+    "/api/v1/completions": {
+      "post": {
+        "operationId": "completions",
+        "summary": "Text completions",
+        "description": "OpenAI-compatible text completions endpoint (legacy)",
+        "tags": ["OpenAI API"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompletionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Completion response"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Status": {
+        "type": "object",
+        "properties": {
+          "apiRunning": {"type": "boolean"},
+          "llamaRunning": {"type": "boolean"},
+          "llamaHealthy": {"type": "boolean"},
+          "llamaPort": {"type": "integer"},
+          "modelsDir": {"type": "string"},
+          "mode": {"type": "string", "enum": ["router", "single"]},
+          "currentPreset": {"type": "object", "nullable": true}
+        }
+      },
+      "SystemStats": {
+        "type": "object",
+        "properties": {
+          "cpu": {
+            "type": "object",
+            "properties": {
+              "usage": {"type": "number"},
+              "cores": {"type": "integer"},
+              "temperature": {"type": "number", "nullable": true}
+            }
+          },
+          "memory": {
+            "type": "object",
+            "properties": {
+              "total": {"type": "integer"},
+              "used": {"type": "integer"},
+              "usage": {"type": "number"}
+            }
+          },
+          "gpu": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "temperature": {"type": "number"},
+              "usage": {"type": "number"},
+              "power": {"type": "number"},
+              "vram": {"type": "object"},
+              "gtt": {"type": "object"}
+            }
+          }
+        }
+      },
+      "Analytics": {
+        "type": "object",
+        "properties": {
+          "temperature": {"type": "array", "items": {"type": "object"}},
+          "power": {"type": "array", "items": {"type": "object"}},
+          "memory": {"type": "array", "items": {"type": "object"}},
+          "tokens": {"type": "array", "items": {"type": "object"}},
+          "tokenStats": {"type": "object"}
+        }
+      },
+      "ModelList": {
+        "type": "object",
+        "properties": {
+          "serverModels": {"type": "array", "items": {"type": "object"}},
+          "localModels": {"type": "array", "items": {"type": "object"}},
+          "modelsDir": {"type": "string"}
+        }
+      },
+      "Settings": {
+        "type": "object",
+        "properties": {
+          "settings": {
+            "type": "object",
+            "properties": {
+              "contextSize": {"type": "integer"},
+              "modelsMax": {"type": "integer"},
+              "autoStart": {"type": "boolean"},
+              "noWarmup": {"type": "boolean"},
+              "flashAttn": {"type": "boolean"},
+              "gpuLayers": {"type": "integer"}
+            }
+          }
+        }
+      },
+      "SettingsUpdate": {
+        "type": "object",
+        "properties": {
+          "contextSize": {"type": "integer", "minimum": 512, "maximum": 262144},
+          "modelsMax": {"type": "integer", "minimum": 1, "maximum": 10},
+          "autoStart": {"type": "boolean"},
+          "noWarmup": {"type": "boolean"},
+          "flashAttn": {"type": "boolean"},
+          "gpuLayers": {"type": "integer", "minimum": 0, "maximum": 999}
+        }
+      },
+      "PresetList": {
+        "type": "object",
+        "properties": {
+          "presets": {"type": "array", "items": {"$ref": "#/components/schemas/Preset"}},
+          "currentPreset": {"type": "string", "nullable": true},
+          "mode": {"type": "string"}
+        }
+      },
+      "Preset": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "description": {"type": "string"},
+          "repo": {"type": "string"},
+          "quantization": {"type": "string"},
+          "context": {"type": "integer"}
+        }
+      },
+      "SearchResults": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {"type": "string"},
+                "author": {"type": "string"},
+                "downloads": {"type": "integer"},
+                "likes": {"type": "integer"}
+              }
+            }
+          }
+        }
+      },
+      "ProcessList": {
+        "type": "object",
+        "properties": {
+          "processes": {"type": "array", "items": {"type": "object"}},
+          "llamaPort": {"type": "integer"}
+        }
+      },
+      "ChatCompletionRequest": {
+        "type": "object",
+        "required": ["model", "messages"],
+        "properties": {
+          "model": {"type": "string"},
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["role", "content"],
+              "properties": {
+                "role": {"type": "string", "enum": ["system", "user", "assistant"]},
+                "content": {"type": "string"}
+              }
+            }
+          },
+          "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+          "max_tokens": {"type": "integer"},
+          "stream": {"type": "boolean"},
+          "top_p": {"type": "number"},
+          "frequency_penalty": {"type": "number"},
+          "presence_penalty": {"type": "number"}
+        }
+      },
+      "CompletionRequest": {
+        "type": "object",
+        "required": ["model", "prompt"],
+        "properties": {
+          "model": {"type": "string"},
+          "prompt": {"type": "string"},
+          "max_tokens": {"type": "integer"},
+          "temperature": {"type": "number"},
+          "stream": {"type": "boolean"}
+        }
+      }
+    }
+  },
+  "tags": [
+    {"name": "Server", "description": "Server control operations"},
+    {"name": "Models", "description": "Model management"},
+    {"name": "Presets", "description": "Optimized model presets"},
+    {"name": "Monitoring", "description": "System and process monitoring"},
+    {"name": "Settings", "description": "Configuration management"},
+    {"name": "Download", "description": "Model download from HuggingFace"},
+    {"name": "OpenAI API", "description": "OpenAI-compatible inference endpoints"}
+  ]
+}

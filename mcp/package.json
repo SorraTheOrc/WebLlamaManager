@@ -1,0 +1,23 @@
+{
+  "name": "llama-manager-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Llama Manager - exposes llama.cpp management APIs as tools for AI agents",
+  "type": "module",
+  "main": "server.js",
+  "bin": {
+    "llama-manager-mcp": "./server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "mcp",
+    "llama",
+    "llama.cpp",
+    "ai",
+    "inference"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

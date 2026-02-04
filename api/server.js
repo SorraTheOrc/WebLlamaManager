@@ -1483,6 +1483,46 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
+// Serve OpenAPI spec
+app.get('/api/openapi.json', (req, res) => {
+  const openapiPath = join(__dirname, 'openapi.json');
+  if (existsSync(openapiPath)) {
+    res.sendFile(openapiPath);
+  } else {
+    res.status(404).json({ error: 'OpenAPI spec not found' });
+  }
+});
+
+// Simple API info endpoint for agents
+app.get('/api/info', (req, res) => {
+  res.json({
+    name: 'Llama Manager',
+    version: '1.0.0',
+    description: 'API for managing llama.cpp inference servers',
+    openapi: '/api/openapi.json',
+    mcp: '/mcp',
+    endpoints: {
+      status: 'GET /api/status',
+      stats: 'GET /api/stats',
+      analytics: 'GET /api/analytics',
+      models: 'GET /api/models',
+      loadModel: 'POST /api/models/load',
+      unloadModel: 'POST /api/models/unload',
+      startServer: 'POST /api/server/start',
+      stopServer: 'POST /api/server/stop',
+      settings: 'GET|POST /api/settings',
+      presets: 'GET /api/presets',
+      activatePreset: 'POST /api/presets/:id/activate',
+      search: 'GET /api/search',
+      download: 'POST /api/pull',
+      processes: 'GET /api/processes',
+      logs: 'GET /api/logs',
+      chatCompletions: 'POST /api/v1/chat/completions',
+      completions: 'POST /api/v1/completions'
+    }
+  });
+});
+
 // Get server logs
 app.get('/api/logs', (req, res) => {
   const limit = parseInt(req.query.limit) || 100;
