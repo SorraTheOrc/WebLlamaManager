@@ -124,18 +124,28 @@ function Sidebar({ stats }) {
           <span className="nav-icon">&#x1F4CA;</span>
           Dashboard
         </NavLink>
-        <NavLink to="/presets" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
-          <span className="nav-icon">&#x2699;</span>
-          Presets
+        <NavLink to="/chat" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+          <span className="nav-icon">&#x1F4AC;</span>
+          Chat
         </NavLink>
+
+        <div className="nav-divider" />
+
         <NavLink to="/models" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
           <span className="nav-icon">&#x1F4E6;</span>
           Models
+        </NavLink>
+        <NavLink to="/presets" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+          <span className="nav-icon">&#x2728;</span>
+          Presets
         </NavLink>
         <NavLink to="/download" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
           <span className="nav-icon">&#x2B07;</span>
           Download
         </NavLink>
+
+        <div className="nav-divider" />
+
         <NavLink to="/logs" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
           <span className="nav-icon">&#x1F4DC;</span>
           Logs
@@ -144,9 +154,12 @@ function Sidebar({ stats }) {
           <span className="nav-icon">&#x1F5A5;</span>
           Processes
         </NavLink>
-        <NavLink to="/settings" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
-          <span className="nav-icon">&#x2699;</span>
-          Settings
+
+        <div className="nav-divider" />
+
+        <NavLink to="/docs" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+          <span className="nav-icon">&#x1F4DA;</span>
+          Docs
         </NavLink>
         <NavLink to="/api-docs" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
           <span className="nav-icon">&#x1F4D6;</span>
@@ -875,6 +888,8 @@ function ModelsPage({ stats }) {
   const [localModels, setLocalModels] = useState([]);
   const [modelsDir, setModelsDir] = useState('');
   const [loading, setLoading] = useState({});
+  const [editingAlias, setEditingAlias] = useState(null);
+  const [aliasInput, setAliasInput] = useState('');
 
   const fetchModels = useCallback(async () => {
     try {
@@ -924,10 +939,44 @@ function ModelsPage({ stats }) {
     setLoading(l => ({ ...l, [modelName]: false }));
   };
 
+  const saveAlias = async (modelName) => {
+    try {
+      await fetch(`${API_BASE}/models/aliases/${encodeURIComponent(modelName)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alias: aliasInput.trim() || null })
+      });
+      await fetchModels();
+    } catch (err) {
+      console.error('Failed to save alias:', err);
+    }
+    setEditingAlias(null);
+    setAliasInput('');
+  };
+
+  const startEditAlias = (model) => {
+    setEditingAlias(model.name);
+    setAliasInput(model.alias || '');
+  };
+
   const getModelStatus = (modelName) => {
     return serverModels.some(m =>
       m.id === modelName || m.model === modelName || (m.id && m.id.includes(modelName))
     ) ? 'loaded' : 'unloaded';
+  };
+
+  // Get display name (alias or short name)
+  const getDisplayName = (model) => {
+    if (model.alias) return model.alias;
+    // Extract just the filename from the path
+    const parts = model.name.split('/');
+    return parts[parts.length - 1];
+  };
+
+  // Find alias for a loaded model
+  const getAliasForLoadedModel = (modelId) => {
+    const localModel = localModels.find(m => m.name === modelId);
+    return localModel?.alias || null;
   };
 
   const isHealthy = stats?.llama?.status === 'ok';
@@ -959,23 +1008,27 @@ function ModelsPage({ stats }) {
         <section className="page-section">
           <h3>Loaded Models</h3>
           <div className="models-grid">
-            {serverModels.map((model) => (
-              <div key={model.id} className="model-card active">
-                <div className="model-header">
-                  <h4>{model.id}</h4>
-                  <span className="badge success">Loaded</span>
+            {serverModels.map((model) => {
+              const alias = getAliasForLoadedModel(model.id);
+              return (
+                <div key={model.id} className="model-card active">
+                  <div className="model-header">
+                    <h4 title={model.id}>{alias || model.id.split('/').pop()}</h4>
+                    <span className="badge success">Loaded</span>
+                  </div>
+                  {alias && <div className="model-path">{model.id}</div>}
+                  <div className="model-actions">
+                    <button
+                      className="btn-secondary"
+                      onClick={() => unloadModel(model.id)}
+                      disabled={loading[model.id]}
+                    >
+                      {loading[model.id] ? 'Unloading...' : 'Unload'}
+                    </button>
+                  </div>
                 </div>
-                <div className="model-actions">
-                  <button
-                    className="btn-secondary"
-                    onClick={() => unloadModel(model.id)}
-                    disabled={loading[model.id]}
-                  >
-                    {loading[model.id] ? 'Unloading...' : 'Unload'}
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       )}
@@ -993,12 +1046,48 @@ function ModelsPage({ stats }) {
             {localModels.map((model) => {
               const status = getModelStatus(model.name);
               const isLoaded = status === 'loaded';
+              const isEditing = editingAlias === model.name;
+
               return (
-                <div key={model.path} className={`model-card ${isLoaded ? 'active' : ''}`}>
+                <div key={model.path} className={`model-card ${isLoaded ? 'active' : ''} ${model.incomplete ? 'incomplete' : ''}`}>
                   <div className="model-header">
-                    <h4 title={model.path}>{model.name}</h4>
-                    {isLoaded && <span className="badge success">Loaded</span>}
+                    {isEditing ? (
+                      <div className="alias-edit">
+                        <input
+                          type="text"
+                          value={aliasInput}
+                          onChange={(e) => setAliasInput(e.target.value)}
+                          placeholder="Enter alias..."
+                          autoFocus
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') saveAlias(model.name);
+                            if (e.key === 'Escape') { setEditingAlias(null); setAliasInput(''); }
+                          }}
+                        />
+                        <button className="btn-small" onClick={() => saveAlias(model.name)}>Save</button>
+                        <button className="btn-small btn-secondary" onClick={() => { setEditingAlias(null); setAliasInput(''); }}>Cancel</button>
+                      </div>
+                    ) : (
+                      <>
+                        <h4 title={model.name}>
+                          {getDisplayName(model)}
+                          <button
+                            className="alias-edit-btn"
+                            onClick={() => startEditAlias(model)}
+                            title={model.alias ? 'Edit alias' : 'Set alias'}
+                          >
+                            ✎
+                          </button>
+                        </h4>
+                        {isLoaded && <span className="badge success">Loaded</span>}
+                        {model.incomplete && <span className="badge warning">Incomplete</span>}
+                        {model.isSplit && !model.incomplete && <span className="badge info">{model.partCount} parts</span>}
+                      </>
+                    )}
                   </div>
+                  {model.alias && !isEditing && (
+                    <div className="model-path">{model.name}</div>
+                  )}
                   <div className="model-info">
                     <span>{formatBytes(model.size)}</span>
                   </div>
@@ -1015,7 +1104,7 @@ function ModelsPage({ stats }) {
                       <button
                         className="btn-primary"
                         onClick={() => loadModel(model.name)}
-                        disabled={loading[model.name] || !isHealthy}
+                        disabled={loading[model.name] || !isHealthy || model.incomplete}
                       >
                         {loading[model.name] ? 'Loading...' : 'Load'}
                       </button>
@@ -1964,6 +2053,79 @@ function ApiDocsPage() {
   const [response, setResponse] = useState(null);
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('manager');
+  const [openaiModels, setOpenaiModels] = useState([]);
+  const [copiedCurl, setCopiedCurl] = useState(false);
+
+  // Fetch models for OpenAI tab
+  const fetchOpenaiModels = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/v1/models`);
+      if (res.ok) {
+        const data = await res.json();
+        setOpenaiModels(data.data || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch OpenAI models:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'openai') {
+      fetchOpenaiModels();
+    }
+  }, [activeTab, fetchOpenaiModels]);
+
+  // Generate curl example
+  const generateCurlExample = useCallback((endpoint, currentParams) => {
+    if (!endpoint) return '';
+
+    const baseUrl = window.location.origin;
+    let url = baseUrl + endpoint.path;
+
+    // Handle path params
+    for (const param of endpoint.params) {
+      if (param.type === 'path' && currentParams[param.name]) {
+        url = url.replace(`:${param.name}`, encodeURIComponent(currentParams[param.name]));
+      }
+    }
+
+    // Handle query params
+    const queryParams = endpoint.params
+      .filter(p => p.type === 'query' && currentParams[p.name] !== undefined && currentParams[p.name] !== '')
+      .map(p => `${p.name}=${encodeURIComponent(currentParams[p.name])}`);
+    if (queryParams.length) url += '?' + queryParams.join('&');
+
+    // Build curl command
+    let curl = `curl -X ${endpoint.method} "${url}"`;
+
+    if (endpoint.method !== 'GET') {
+      curl += ` \\\n  -H "Content-Type: application/json"`;
+
+      const bodyParams = {};
+      for (const param of endpoint.params) {
+        if (!['path', 'query'].includes(param.type) && currentParams[param.name] !== undefined && currentParams[param.name] !== '') {
+          bodyParams[param.name] = currentParams[param.name];
+        }
+      }
+
+      if (Object.keys(bodyParams).length) {
+        curl += ` \\\n  -d '${JSON.stringify(bodyParams, null, 2).replace(/\n/g, '\n  ')}'`;
+      }
+    }
+
+    return curl;
+  }, []);
+
+  const copyCurl = async () => {
+    const curl = generateCurlExample(activeEndpoint, params);
+    try {
+      await navigator.clipboard.writeText(curl);
+      setCopiedCurl(true);
+      setTimeout(() => setCopiedCurl(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
 
   const managerEndpoints = [
     {
@@ -2378,6 +2540,16 @@ function ApiDocsPage() {
                             placeholder={`Enter JSON...`}
                             rows={4}
                           />
+                        ) : param.name === 'model' && activeTab === 'openai' && openaiModels.length > 0 ? (
+                          <select
+                            value={params[param.name] ?? ''}
+                            onChange={(e) => handleParamChange(param.name, e.target.value, 'string')}
+                          >
+                            <option value="">-- Select model --</option>
+                            {openaiModels.map(m => (
+                              <option key={m.id} value={m.id}>{m.id}</option>
+                            ))}
+                          </select>
                         ) : (
                           <input
                             type={param.type === 'number' ? 'number' : 'text'}
@@ -2388,6 +2560,24 @@ function ApiDocsPage() {
                         )}
                       </div>
                     ))}
+                  </div>
+                </div>
+              )}
+
+              {/* curl Example */}
+              {activeEndpoint && (
+                <div className="curl-section">
+                  <h4>
+                    curl Example
+                    <button
+                      className={`curl-copy-btn ${copiedCurl ? 'copied' : ''}`}
+                      onClick={copyCurl}
+                    >
+                      {copiedCurl ? 'Copied!' : 'Copy'}
+                    </button>
+                  </h4>
+                  <div className="curl-code-container">
+                    <pre className="curl-code">{generateCurlExample(activeEndpoint, params)}</pre>
                   </div>
                 </div>
               )}
@@ -2441,6 +2631,248 @@ function ApiDocsPage() {
   );
 }
 
+// Compact Stats Header
+function StatsHeader({ stats }) {
+  const [showDownloads, setShowDownloads] = useState(false);
+  const [expandedDownload, setExpandedDownload] = useState(null);
+  const [copiedId, setCopiedId] = useState(null);
+  const dropdownRef = useRef(null);
+  const isHealthy = stats?.llama?.status === 'ok';
+
+  // Get downloads from stats
+  const downloads = stats?.downloads ? Object.entries(stats.downloads).map(([id, info]) => ({ id, ...info })) : [];
+  const activeDownloads = downloads.filter(d => d.status === 'downloading' || d.status === 'starting');
+  const recentDownloads = downloads.filter(d => d.status === 'completed' || d.status === 'failed');
+  const hasDownloads = downloads.length > 0;
+  const hasErrors = downloads.some(d => d.status === 'failed');
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+        setShowDownloads(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const copyToClipboard = async (text, id) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
+
+  const clearDownload = async (downloadId) => {
+    try {
+      await fetch(`/api/downloads/${encodeURIComponent(downloadId)}`, { method: 'DELETE' });
+    } catch (err) {
+      console.error('Failed to clear download:', err);
+    }
+  };
+
+  const getStatusIcon = (status) => {
+    switch (status) {
+      case 'downloading':
+      case 'starting':
+        return '⬇️';
+      case 'completed':
+        return '✓';
+      case 'failed':
+        return '✗';
+      default:
+        return '•';
+    }
+  };
+
+  const getShortName = (id) => {
+    // Extract just the repo name from "author/repo:quantization" or "author/repo:filename"
+    const parts = id.split(':');
+    const repo = parts[0].split('/').pop();
+    const quant = parts[1] || '';
+    return quant ? `${repo} (${quant})` : repo;
+  };
+
+  if (!stats) return null;
+
+  return (
+    <div className="stats-header">
+      <div className="stats-header-items">
+        <div className="stats-header-item" title="CPU Usage">
+          <ProgressRing
+            value={stats?.cpu?.usage || 0}
+            size={36}
+            strokeWidth={4}
+            color={stats?.cpu?.usage > 80 ? 'var(--error)' : 'var(--accent)'}
+          />
+          <span className="stats-header-label">CPU</span>
+        </div>
+
+        <div className="stats-header-item" title="Memory Usage">
+          <ProgressRing
+            value={stats?.memory?.usage || 0}
+            size={36}
+            strokeWidth={4}
+            color={stats?.memory?.usage > 80 ? 'var(--error)' : 'var(--success)'}
+          />
+          <span className="stats-header-label">RAM</span>
+        </div>
+
+        {stats?.gpu && (
+          <>
+            <div className="stats-header-item" title={stats.gpu.isAPU ? 'GTT Usage' : 'VRAM Usage'}>
+              <ProgressRing
+                value={stats.gpu.isAPU ? (stats.gpu.gtt?.usage || 0) : (stats.gpu.vram?.usage || 0)}
+                size={36}
+                strokeWidth={4}
+                color="var(--warning)"
+              />
+              <span className="stats-header-label">{stats.gpu.isAPU ? 'GTT' : 'VRAM'}</span>
+            </div>
+
+            <div className="stats-header-item" title="GPU Usage">
+              <ProgressRing
+                value={stats.gpu.usage || 0}
+                size={36}
+                strokeWidth={4}
+                color="var(--accent)"
+              />
+              <span className="stats-header-label">GPU</span>
+            </div>
+
+            {stats.gpu.temperature > 0 && (
+              <div className="stats-header-item temp" title="GPU Temperature">
+                <span className="stats-header-temp">{stats.gpu.temperature}°</span>
+                <span className="stats-header-label">Temp</span>
+              </div>
+            )}
+          </>
+        )}
+
+        <div className="stats-header-item" title="Context Usage">
+          <ProgressRing
+            value={stats?.context?.usage || 0}
+            size={36}
+            strokeWidth={4}
+            color="var(--info)"
+          />
+          <span className="stats-header-label">Ctx</span>
+        </div>
+      </div>
+
+      <div className="stats-header-right">
+        {/* Downloads indicator */}
+        {hasDownloads && (
+          <div className="stats-header-downloads" ref={dropdownRef}>
+            <button
+              className={`downloads-btn ${hasErrors ? 'has-errors' : ''} ${activeDownloads.length > 0 ? 'active' : ''}`}
+              onClick={() => setShowDownloads(!showDownloads)}
+              title={`${activeDownloads.length} active, ${recentDownloads.length} recent downloads`}
+            >
+              <span className="downloads-icon">⬇️</span>
+              {activeDownloads.length > 0 && (
+                <span className="downloads-count">{activeDownloads.length}</span>
+              )}
+              {hasErrors && <span className="downloads-error-dot" />}
+            </button>
+
+            {showDownloads && (
+              <div className="downloads-dropdown">
+                <div className="downloads-dropdown-header">
+                  <span>Downloads</span>
+                </div>
+                <div className="downloads-list">
+                  {downloads.length === 0 ? (
+                    <div className="downloads-empty">No downloads</div>
+                  ) : (
+                    downloads.map(download => (
+                      <div key={download.id} className={`download-item ${download.status}`}>
+                        <div
+                          className="download-item-header"
+                          onClick={() => setExpandedDownload(expandedDownload === download.id ? null : download.id)}
+                        >
+                          <span className={`download-status-icon ${download.status}`}>
+                            {getStatusIcon(download.status)}
+                          </span>
+                          <span className="download-name" title={download.id}>
+                            {getShortName(download.id)}
+                          </span>
+                          {download.status === 'downloading' && (
+                            <span className="download-progress">{download.progress}%</span>
+                          )}
+                          {(download.status === 'completed' || download.status === 'failed') && (
+                            <button
+                              className="download-clear-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                clearDownload(download.id);
+                              }}
+                              title="Clear"
+                            >
+                              ×
+                            </button>
+                          )}
+                        </div>
+
+                        {download.status === 'downloading' && (
+                          <div className="download-progress-bar">
+                            <div
+                              className="download-progress-fill"
+                              style={{ width: `${download.progress}%` }}
+                            />
+                          </div>
+                        )}
+
+                        {expandedDownload === download.id && (download.error || download.output) && (
+                          <div className="download-details">
+                            {download.error && (
+                              <div className="download-error">
+                                <strong>Error:</strong> {download.error}
+                              </div>
+                            )}
+                            {download.output && (
+                              <div className="download-output">
+                                <div className="download-output-header">
+                                  <span>Output</span>
+                                  <button
+                                    className="download-copy-btn"
+                                    onClick={() => copyToClipboard(download.output, download.id)}
+                                  >
+                                    {copiedId === download.id ? 'Copied!' : 'Copy'}
+                                  </button>
+                                </div>
+                                <pre className="download-output-content">{download.output}</pre>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="stats-header-status">
+          <span className={`status-dot-mini ${isHealthy ? 'healthy' : stats?.mode ? 'starting' : 'stopped'}`} />
+          <span className="stats-header-mode">
+            {isHealthy ? (stats?.mode === 'single' ? 'Single' : 'Router') : (stats?.mode ? 'Starting' : 'Stopped')}
+          </span>
+        </div>
+        <NavLink to="/settings" className="stats-header-settings" title="Settings">
+          <span>&#x2699;</span>
+        </NavLink>
+      </div>
+    </div>
+  );
+}
+
 // Query Panel Component
 function QueryPanel({ stats }) {
   const [isOpen, setIsOpen] = useState(false);
@@ -2453,6 +2885,7 @@ function QueryPanel({ stats }) {
   const [isLoading, setIsLoading] = useState(false);
   const [streamingMessage, setStreamingMessage] = useState('');
   const [hoveredMessage, setHoveredMessage] = useState(null);
+  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
   const [copiedId, setCopiedId] = useState(null);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
@@ -2671,7 +3104,12 @@ function QueryPanel({ stats }) {
             <div
               key={msg.id}
               className={`query-message ${msg.role}`}
-              onMouseEnter={() => msg.stats && setHoveredMessage(msg.id)}
+              onMouseMove={(e) => {
+                if (msg.stats) {
+                  setHoveredMessage(msg.id);
+                  setTooltipPos({ x: e.clientX + 10, y: e.clientY + 10 });
+                }
+              }}
               onMouseLeave={() => setHoveredMessage(null)}
             >
               <div className="message-header">
@@ -2689,7 +3127,10 @@ function QueryPanel({ stats }) {
               <div className="message-content">{msg.content}</div>
               {/* Stats tooltip on hover for assistant messages */}
               {msg.role === 'assistant' && msg.stats && hoveredMessage === msg.id && (
-                <div className="message-stats-tooltip">
+                <div
+                  className="message-stats-tooltip"
+                  style={{ left: tooltipPos.x, top: tooltipPos.y }}
+                >
                   <div className="stats-tooltip-row">
                     <span className="stats-label">Model:</span>
                     <span className="stats-value">{msg.stats.model}</span>
@@ -2752,6 +3193,961 @@ function QueryPanel({ stats }) {
   );
 }
 
+// Documentation Page
+function DocsPage() {
+  const [activeSection, setActiveSection] = useState('overview');
+  const [copiedCode, setCopiedCode] = useState(null);
+  const [models, setModels] = useState([]);
+
+  // Fetch models for OpenCode config generation
+  useEffect(() => {
+    const fetchModels = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/v1/models`);
+        if (res.ok) {
+          const data = await res.json();
+          setModels(data.data || []);
+        }
+      } catch (err) {
+        console.error('Failed to fetch models:', err);
+      }
+    };
+    fetchModels();
+  }, []);
+
+  // Generate OpenCode config with all models
+  const generateOpenCodeConfig = () => {
+    const modelsConfig = {};
+    models.forEach(model => {
+      // Determine context limit based on model name
+      let contextLimit = 32768;
+      const modelLower = model.id.toLowerCase();
+      if (modelLower.includes('128k') || modelLower.includes('131072')) {
+        contextLimit = 131072;
+      } else if (modelLower.includes('64k') || modelLower.includes('65536')) {
+        contextLimit = 65536;
+      } else if (modelLower.includes('32k') || modelLower.includes('32768')) {
+        contextLimit = 32768;
+      } else if (modelLower.includes('16k') || modelLower.includes('16384')) {
+        contextLimit = 16384;
+      } else if (modelLower.includes('8k') || modelLower.includes('8192')) {
+        contextLimit = 8192;
+      }
+
+      modelsConfig[model.id] = {
+        name: model.id.split('/').pop().replace(/-/g, ' ').replace(/\.gguf$/i, ''),
+        limit: {
+          context: contextLimit,
+          output: 4096
+        }
+      };
+    });
+
+    return JSON.stringify({
+      "$schema": "https://opencode.ai/config.json",
+      provider: {
+        "llama-manager": {
+          npm: "@ai-sdk/openai-compatible",
+          name: "Llama Manager",
+          options: {
+            baseURL: `${window.location.origin}/api/v1`
+          },
+          models: modelsConfig
+        }
+      }
+    }, null, 2);
+  };
+
+  const copyCode = async (code, id) => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopiedCode(id);
+      setTimeout(() => setCopiedCode(null), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
+
+  const CodeBlock = ({ code, language, id }) => (
+    <div className="docs-code-block">
+      <div className="docs-code-header">
+        <span>{language}</span>
+        <button
+          className={`docs-copy-btn ${copiedCode === id ? 'copied' : ''}`}
+          onClick={() => copyCode(code, id)}
+        >
+          {copiedCode === id ? 'Copied!' : 'Copy'}
+        </button>
+      </div>
+      <pre><code>{code}</code></pre>
+    </div>
+  );
+
+  const sections = [
+    { id: 'overview', title: 'Overview' },
+    { id: 'opencode', title: 'OpenCode Setup' },
+    { id: 'mcp-setup', title: 'MCP Setup' },
+    { id: 'api-usage', title: 'API Usage' },
+    { id: 'features', title: 'Features' },
+  ];
+
+  return (
+    <div className="page docs-page">
+      <div className="docs-layout">
+        <nav className="docs-sidebar">
+          <div className="docs-nav">
+            {sections.map(section => (
+              <button
+                key={section.id}
+                className={`docs-nav-item ${activeSection === section.id ? 'active' : ''}`}
+                onClick={() => setActiveSection(section.id)}
+              >
+                {section.title}
+              </button>
+            ))}
+          </div>
+        </nav>
+
+        <div className="docs-content">
+          {activeSection === 'overview' && (
+            <section className="docs-section">
+              <h2>Overview</h2>
+              <p>
+                Llama Manager is a service for managing llama.cpp in multi-model router mode.
+                It provides a web UI, REST API, and MCP server for AI agent integration.
+              </p>
+
+              <h3>Key Features</h3>
+              <ul>
+                <li><strong>Multi-model support</strong>: Load and unload models dynamically without restarting</li>
+                <li><strong>Web UI</strong>: Modern React interface for model management and chat</li>
+                <li><strong>OpenAI-compatible API</strong>: Drop-in replacement for OpenAI API clients</li>
+                <li><strong>MCP Server</strong>: Integration with Claude Desktop and other AI agents</li>
+                <li><strong>Real-time monitoring</strong>: GPU stats, logs, and performance analytics</li>
+              </ul>
+
+              <h3>Quick Start</h3>
+              <CodeBlock
+                id="quickstart"
+                language="bash"
+                code={`# Install and start
+./install.sh
+systemctl --user enable --now llama-manager
+
+# Access the web UI
+open http://localhost:5250`}
+              />
+            </section>
+          )}
+
+          {activeSection === 'opencode' && (
+            <section className="docs-section">
+              <h2>OpenCode Setup</h2>
+              <p>
+                Llama Manager works with <a href="https://opencode.ai" target="_blank" rel="noopener noreferrer">OpenCode</a> as
+                an OpenAI-compatible provider.
+              </p>
+
+              <h3>Quick Setup Prompt</h3>
+              <p>Paste this prompt into OpenCode to have it configure itself:</p>
+              <CodeBlock
+                id="opencode-prompt"
+                language="text"
+                code={`Configure yourself to use my local Llama Manager as a provider. Create or update opencode.json with:
+- Provider ID: "llama-manager"
+- Use @ai-sdk/openai-compatible
+- Base URL: ${window.location.origin}/api/v1
+- No API key needed (local server)
+
+Then fetch the available models from ${window.location.origin}/api/v1/models and add them to the config.
+Set reasonable context limits based on the model names (32k for most, 128k for models with "128k" in name).`}
+              />
+
+              <h3>Manual Configuration</h3>
+              <p>Add to your <code>opencode.json</code>:</p>
+              <CodeBlock
+                id="opencode-config"
+                language="json"
+                code={`{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "llama-manager": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Llama Manager",
+      "options": {
+        "baseURL": "${window.location.origin}/api/v1"
+      },
+      "models": {
+        "your-model-id": {
+          "name": "Your Model Name",
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        }
+      }
+    }
+  }
+}`}
+              />
+
+              <h3>Your Configuration (Auto-Generated)</h3>
+              {models.length > 0 ? (
+                <>
+                  <p>Copy this complete configuration with your {models.length} loaded model{models.length !== 1 ? 's' : ''}:</p>
+                  <CodeBlock
+                    id="opencode-auto-config"
+                    language="json"
+                    code={generateOpenCodeConfig()}
+                  />
+                </>
+              ) : (
+                <div className="docs-info-box">
+                  <p>No models currently loaded. Load models in the <a href="/models">Models</a> page to generate a complete configuration.</p>
+                </div>
+              )}
+
+              <h3>Get Model IDs Manually</h3>
+              <p>You can also list models via API:</p>
+              <CodeBlock
+                id="opencode-models"
+                language="bash"
+                code={`curl ${window.location.origin}/api/v1/models`}
+              />
+
+              <h3>Configuration Options</h3>
+              <table className="docs-table">
+                <thead>
+                  <tr>
+                    <th>Option</th>
+                    <th>Value</th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>npm</code></td>
+                    <td><code>@ai-sdk/openai-compatible</code></td>
+                    <td>AI SDK package for OpenAI-compatible APIs</td>
+                  </tr>
+                  <tr>
+                    <td><code>baseURL</code></td>
+                    <td><code>{window.location.origin}/api/v1</code></td>
+                    <td>Llama Manager OpenAI-compatible endpoint</td>
+                  </tr>
+                  <tr>
+                    <td><code>limit.context</code></td>
+                    <td>Model-dependent</td>
+                    <td>Max context window (check model specs)</td>
+                  </tr>
+                  <tr>
+                    <td><code>limit.output</code></td>
+                    <td><code>4096</code> typical</td>
+                    <td>Max output tokens per request</td>
+                  </tr>
+                </tbody>
+              </table>
+            </section>
+          )}
+
+          {activeSection === 'mcp-setup' && (
+            <section className="docs-section">
+              <h2>MCP Setup</h2>
+              <p>
+                The MCP (Model Context Protocol) server allows AI agents like Claude Desktop
+                to interact with Llama Manager programmatically.
+              </p>
+
+              <h3>Your Configuration (Copy & Paste)</h3>
+              <p>Add to <code>~/.config/Claude/claude_desktop_config.json</code>:</p>
+              <CodeBlock
+                id="mcp-config"
+                language="json"
+                code={`{
+  "mcpServers": {
+    "llama-manager": {
+      "command": "node",
+      "args": ["${window.location.pathname.includes('/ui') ? window.location.origin.replace(/:\d+$/, '') : window.location.origin}/mcp/server.js"],
+      "env": {
+        "LLAMA_MANAGER_URL": "${window.location.origin}"
+      }
+    }
+  }
+}`}
+              />
+              <p className="docs-hint">
+                Note: Replace the <code>args</code> path with the actual path to your llama-server installation if different.
+              </p>
+
+              <h3>Environment Variables</h3>
+              <table className="docs-table">
+                <thead>
+                  <tr>
+                    <th>Variable</th>
+                    <th>Your Value</th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>LLAMA_MANAGER_URL</code></td>
+                    <td><code>{window.location.origin}</code></td>
+                    <td>Llama Manager API URL</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <h3>Available MCP Tools</h3>
+              <table className="docs-table">
+                <thead>
+                  <tr>
+                    <th>Tool</th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td><code>llama_get_status</code></td><td>Get server status and health</td></tr>
+                  <tr><td><code>llama_get_stats</code></td><td>Get CPU, memory, GPU statistics</td></tr>
+                  <tr><td><code>llama_list_models</code></td><td>List available and loaded models</td></tr>
+                  <tr><td><code>llama_load_model</code></td><td>Load a model into the server</td></tr>
+                  <tr><td><code>llama_unload_model</code></td><td>Unload a model</td></tr>
+                  <tr><td><code>llama_chat</code></td><td>Send chat completion requests</td></tr>
+                  <tr><td><code>llama_search_models</code></td><td>Search HuggingFace for models</td></tr>
+                  <tr><td><code>llama_download_model</code></td><td>Download models from HuggingFace</td></tr>
+                  <tr><td><code>llama_start_server</code></td><td>Start the llama server</td></tr>
+                  <tr><td><code>llama_stop_server</code></td><td>Stop the llama server</td></tr>
+                  <tr><td><code>llama_get_settings</code></td><td>Get current server settings</td></tr>
+                  <tr><td><code>llama_update_settings</code></td><td>Update server settings</td></tr>
+                  <tr><td><code>llama_list_presets</code></td><td>List available presets</td></tr>
+                  <tr><td><code>llama_activate_preset</code></td><td>Activate an optimized preset</td></tr>
+                  <tr><td><code>llama_get_processes</code></td><td>List running processes</td></tr>
+                  <tr><td><code>llama_get_logs</code></td><td>Get recent server logs</td></tr>
+                  <tr><td><code>llama_get_analytics</code></td><td>Get performance analytics</td></tr>
+                </tbody>
+              </table>
+            </section>
+          )}
+
+          {activeSection === 'api-usage' && (
+            <section className="docs-section">
+              <h2>API Usage</h2>
+
+              <h3>Base URLs</h3>
+              <ul>
+                <li><strong>Manager API</strong>: <code>{window.location.origin}/api</code></li>
+                <li><strong>OpenAI API</strong>: <code>{window.location.origin}/api/v1</code></li>
+              </ul>
+
+              <h3>Authentication</h3>
+              <p>No authentication is required. The API is designed for local use.</p>
+
+              <h3>Chat Completion Example</h3>
+              <CodeBlock
+                id="chat-example"
+                language="bash"
+                code={`curl -X POST ${window.location.origin}/api/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "your-model-id",
+    "messages": [
+      {"role": "user", "content": "Hello!"}
+    ],
+    "stream": true
+  }'`}
+              />
+
+              <h3>List Models</h3>
+              <CodeBlock
+                id="list-models"
+                language="bash"
+                code={`curl ${window.location.origin}/api/models`}
+              />
+
+              <h3>Load Model</h3>
+              <CodeBlock
+                id="load-model"
+                language="bash"
+                code={`curl -X POST ${window.location.origin}/api/models/load \\
+  -H "Content-Type: application/json" \\
+  -d '{"model": "path/to/model.gguf"}'`}
+              />
+
+              <h3>OpenAI SDK Usage</h3>
+              <CodeBlock
+                id="openai-sdk"
+                language="python"
+                code={`from openai import OpenAI
+
+client = OpenAI(
+    base_url="${window.location.origin}/api/v1",
+    api_key="not-needed"
+)
+
+response = client.chat.completions.create(
+    model="your-model-id",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+print(response.choices[0].message.content)`}
+              />
+            </section>
+          )}
+
+          {activeSection === 'features' && (
+            <section className="docs-section">
+              <h2>Features</h2>
+
+              <h3>Router Mode (Default)</h3>
+              <p>
+                In router mode, multiple models can be loaded simultaneously. The server
+                manages model loading/unloading with LRU eviction when hitting the max models limit.
+              </p>
+              <ul>
+                <li>Dynamic model loading without server restart</li>
+                <li>Configurable max loaded models (default: 2)</li>
+                <li>Automatic model switching based on requests</li>
+              </ul>
+
+              <h3>Single-Model Mode</h3>
+              <p>
+                Activated via presets, single-model mode runs one model with optimized settings.
+                Use this for maximum performance with a specific model.
+              </p>
+
+              <h3>Presets</h3>
+              <p>
+                Presets are pre-configured model settings optimized for specific use cases.
+                They specify the model, quantization, context size, and other parameters.
+              </p>
+
+              <h3>Download Management</h3>
+              <p>
+                Download GGUF models directly from HuggingFace. The manager:
+              </p>
+              <ul>
+                <li>Searches HuggingFace for GGUF models</li>
+                <li>Lists available quantizations</li>
+                <li>Downloads with progress tracking</li>
+                <li>Supports split model files</li>
+              </ul>
+
+              <h3>Real-time Monitoring</h3>
+              <p>
+                The dashboard shows real-time stats via WebSocket:
+              </p>
+              <ul>
+                <li>CPU and memory usage</li>
+                <li>GPU temperature, power, and VRAM</li>
+                <li>Token generation speed</li>
+                <li>Context usage per model</li>
+              </ul>
+            </section>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Chat Page
+function ChatPage({ stats }) {
+  const [conversations, setConversations] = useState(() => {
+    try {
+      const saved = localStorage.getItem('chat_conversations');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [activeConversationId, setActiveConversationId] = useState(() => {
+    try {
+      return localStorage.getItem('chat_active_conversation') || null;
+    } catch {
+      return null;
+    }
+  });
+  const [models, setModels] = useState([]);
+  const [prompt, setPrompt] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [streamingMessage, setStreamingMessage] = useState('');
+  const [pendingImages, setPendingImages] = useState([]);
+  const [hoveredMessage, setHoveredMessage] = useState(null);
+  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
+  const [copiedId, setCopiedId] = useState(null);
+  const messagesEndRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  const activeConversation = conversations.find(c => c.id === activeConversationId);
+
+  // Persist conversations
+  useEffect(() => {
+    localStorage.setItem('chat_conversations', JSON.stringify(conversations));
+  }, [conversations]);
+
+  useEffect(() => {
+    if (activeConversationId) {
+      localStorage.setItem('chat_active_conversation', activeConversationId);
+    }
+  }, [activeConversationId]);
+
+  // Fetch models
+  const fetchModels = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/v1/models`);
+      if (res.ok) {
+        const data = await res.json();
+        setModels(data.data || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch models:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchModels();
+    const interval = setInterval(fetchModels, 10000);
+    return () => clearInterval(interval);
+  }, [fetchModels]);
+
+  // Auto-scroll to bottom
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [activeConversation?.messages, streamingMessage]);
+
+  const createConversation = () => {
+    const newConv = {
+      id: Date.now().toString(),
+      title: 'New Chat',
+      model: models[0]?.id || '',
+      messages: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    setConversations(prev => [newConv, ...prev]);
+    setActiveConversationId(newConv.id);
+  };
+
+  const deleteConversation = (id) => {
+    setConversations(prev => prev.filter(c => c.id !== id));
+    if (activeConversationId === id) {
+      const remaining = conversations.filter(c => c.id !== id);
+      setActiveConversationId(remaining[0]?.id || null);
+    }
+  };
+
+  const updateConversation = (id, updates) => {
+    setConversations(prev => prev.map(c =>
+      c.id === id ? { ...c, ...updates, updatedAt: new Date().toISOString() } : c
+    ));
+  };
+
+  const copyToClipboard = async (text, messageId) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(messageId);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
+
+  const handleImageUpload = (e) => {
+    const files = Array.from(e.target.files);
+    files.forEach(file => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        setPendingImages(prev => [...prev, {
+          id: Date.now() + Math.random(),
+          name: file.name,
+          url: event.target.result
+        }]);
+      };
+      reader.readAsDataURL(file);
+    });
+    e.target.value = '';
+  };
+
+  const removePendingImage = (id) => {
+    setPendingImages(prev => prev.filter(img => img.id !== id));
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if ((!prompt.trim() && pendingImages.length === 0) || isLoading || !activeConversation) return;
+
+    // Build message content
+    let content;
+    if (pendingImages.length > 0) {
+      content = [];
+      if (prompt.trim()) {
+        content.push({ type: 'text', text: prompt.trim() });
+      }
+      pendingImages.forEach(img => {
+        content.push({
+          type: 'image_url',
+          image_url: { url: img.url }
+        });
+      });
+    } else {
+      content = prompt.trim();
+    }
+
+    const userMessage = {
+      id: Date.now().toString(),
+      role: 'user',
+      content,
+      timestamp: new Date().toISOString()
+    };
+
+    // Update title from first message
+    if (activeConversation.messages.length === 0 && typeof content === 'string') {
+      updateConversation(activeConversation.id, {
+        title: content.slice(0, 50) + (content.length > 50 ? '...' : '')
+      });
+    }
+
+    updateConversation(activeConversation.id, {
+      messages: [...activeConversation.messages, userMessage]
+    });
+
+    setPrompt('');
+    setPendingImages([]);
+    setIsLoading(true);
+    setStreamingMessage('');
+
+    const startTime = Date.now();
+    let tokenCount = 0;
+
+    try {
+      // Build messages array for API
+      const apiMessages = [...activeConversation.messages, userMessage].map(m => ({
+        role: m.role,
+        content: m.content
+      }));
+
+      const response = await fetch(`${API_BASE}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: activeConversation.model,
+          messages: apiMessages,
+          stream: true
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let fullContent = '';
+      let usage = null;
+      let modelUsed = activeConversation.model;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            if (data === '[DONE]') continue;
+
+            try {
+              const parsed = JSON.parse(data);
+              const content = parsed.choices?.[0]?.delta?.content || '';
+              if (content) {
+                fullContent += content;
+                tokenCount++;
+                setStreamingMessage(fullContent);
+              }
+              if (parsed.usage) usage = parsed.usage;
+              if (parsed.model) modelUsed = parsed.model;
+            } catch {
+              // Skip invalid JSON
+            }
+          }
+        }
+      }
+
+      const duration = Date.now() - startTime;
+      const tokensPerSecond = duration > 0 ? (tokenCount / (duration / 1000)) : 0;
+
+      const assistantMessage = {
+        id: Date.now().toString(),
+        role: 'assistant',
+        content: fullContent,
+        timestamp: new Date().toISOString(),
+        stats: {
+          model: modelUsed,
+          promptTokens: usage?.prompt_tokens || 0,
+          completionTokens: usage?.completion_tokens || tokenCount,
+          totalTokens: (usage?.prompt_tokens || 0) + (usage?.completion_tokens || tokenCount),
+          tokensPerSecond: Math.round(tokensPerSecond * 10) / 10,
+          duration: Math.round(duration)
+        }
+      };
+
+      updateConversation(activeConversation.id, {
+        messages: [...activeConversation.messages, userMessage, assistantMessage]
+      });
+      setStreamingMessage('');
+    } catch (err) {
+      console.error('Chat failed:', err);
+      const errorMessage = {
+        id: Date.now().toString(),
+        role: 'assistant',
+        content: `Error: ${err.message}`,
+        timestamp: new Date().toISOString()
+      };
+      updateConversation(activeConversation.id, {
+        messages: [...activeConversation.messages, userMessage, errorMessage]
+      });
+    }
+
+    setIsLoading(false);
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit(e);
+    }
+  };
+
+  const clearChat = () => {
+    if (activeConversation) {
+      updateConversation(activeConversation.id, { messages: [] });
+    }
+    setStreamingMessage('');
+    setHoveredMessage(null);
+  };
+
+  const isHealthy = stats?.llama?.status === 'ok';
+
+  const formatTimestamp = (ts) => {
+    const date = new Date(ts);
+    const now = new Date();
+    const diff = now - date;
+    if (diff < 86400000) {
+      return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    }
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  };
+
+  const renderMessageContent = (content) => {
+    if (typeof content === 'string') {
+      return content;
+    }
+    // Multimodal content
+    return content.map((part, i) => {
+      if (part.type === 'text') {
+        return <span key={i}>{part.text}</span>;
+      }
+      if (part.type === 'image_url') {
+        return <img key={i} src={part.image_url.url} alt="User uploaded" className="message-image" />;
+      }
+      return null;
+    });
+  };
+
+  return (
+    <div className="page chat-page">
+      <div className="chat-layout">
+        {/* Conversations Sidebar */}
+        <div className="chat-sidebar">
+          <div className="chat-sidebar-header">
+            <h3>Conversations</h3>
+            <button className="btn-primary btn-small" onClick={createConversation}>
+              + New
+            </button>
+          </div>
+          <div className="conversation-list">
+            {conversations.length === 0 ? (
+              <div className="chat-empty-sidebar">
+                <p>No conversations yet</p>
+              </div>
+            ) : (
+              conversations.map(conv => (
+                <div
+                  key={conv.id}
+                  className={`conversation-item ${conv.id === activeConversationId ? 'active' : ''}`}
+                  onClick={() => setActiveConversationId(conv.id)}
+                >
+                  <div className="conv-title">{conv.title}</div>
+                  <div className="conv-meta">
+                    {formatTimestamp(conv.updatedAt)}
+                    <button
+                      className="conv-delete"
+                      onClick={(e) => { e.stopPropagation(); deleteConversation(conv.id); }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Main Chat Area */}
+        <div className="chat-main">
+          {activeConversation ? (
+            <>
+              <div className="chat-header">
+                <select
+                  value={activeConversation.model}
+                  onChange={(e) => updateConversation(activeConversation.id, { model: e.target.value })}
+                  disabled={!isHealthy || models.length === 0}
+                >
+                  {models.length === 0 ? (
+                    <option value="">No models available</option>
+                  ) : (
+                    models.map(m => (
+                      <option key={m.id} value={m.id}>{m.id}</option>
+                    ))
+                  )}
+                </select>
+                <button className="btn-ghost btn-small" onClick={clearChat} title="Clear chat">
+                  Clear
+                </button>
+              </div>
+
+              <div className="chat-messages">
+                {activeConversation.messages.length === 0 && !streamingMessage && (
+                  <div className="chat-empty">
+                    <p>Send a message to start the conversation</p>
+                    {!isHealthy && <p className="hint">Server is not running</p>}
+                  </div>
+                )}
+                {activeConversation.messages.map((msg) => (
+                  <div
+                    key={msg.id}
+                    className={`chat-message ${msg.role}`}
+                    onMouseMove={(e) => {
+                      if (msg.stats) {
+                        setHoveredMessage(msg.id);
+                        setTooltipPos({ x: e.clientX + 10, y: e.clientY + 10 });
+                      }
+                    }}
+                    onMouseLeave={() => setHoveredMessage(null)}
+                  >
+                    <div className="message-header">
+                      <span className="message-role">{msg.role === 'user' ? 'You' : 'AI'}</span>
+                      <div className="message-actions">
+                        <button
+                          className={`btn-icon ${copiedId === msg.id ? 'copied' : ''}`}
+                          onClick={() => copyToClipboard(
+                            typeof msg.content === 'string' ? msg.content : msg.content.map(p => p.text || '').join(''),
+                            msg.id
+                          )}
+                          title="Copy"
+                        >
+                          {copiedId === msg.id ? '✓' : '📋'}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="message-content">{renderMessageContent(msg.content)}</div>
+                    {msg.role === 'assistant' && msg.stats && hoveredMessage === msg.id && (
+                      <div
+                        className="message-stats-tooltip"
+                        style={{ left: tooltipPos.x, top: tooltipPos.y }}
+                      >
+                        <div className="stats-tooltip-row">
+                          <span className="stats-label">Model:</span>
+                          <span className="stats-value">{msg.stats.model}</span>
+                        </div>
+                        <div className="stats-tooltip-row">
+                          <span className="stats-label">Speed:</span>
+                          <span className="stats-value">{msg.stats.tokensPerSecond} tok/s</span>
+                        </div>
+                        <div className="stats-tooltip-row">
+                          <span className="stats-label">Tokens:</span>
+                          <span className="stats-value">{msg.stats.completionTokens}</span>
+                        </div>
+                        <div className="stats-tooltip-row">
+                          <span className="stats-label">Duration:</span>
+                          <span className="stats-value">{(msg.stats.duration / 1000).toFixed(2)}s</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {streamingMessage && (
+                  <div className="chat-message assistant streaming">
+                    <div className="message-header">
+                      <span className="message-role">AI</span>
+                    </div>
+                    <div className="message-content">{streamingMessage}</div>
+                  </div>
+                )}
+                <div ref={messagesEndRef} />
+              </div>
+
+              {/* Pending Images */}
+              {pendingImages.length > 0 && (
+                <div className="pending-images">
+                  {pendingImages.map(img => (
+                    <div key={img.id} className="pending-image">
+                      <img src={img.url} alt={img.name} />
+                      <button onClick={() => removePendingImage(img.id)}>×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <form className="chat-input-area" onSubmit={handleSubmit}>
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleImageUpload}
+                  accept="image/*"
+                  multiple
+                  style={{ display: 'none' }}
+                />
+                <button
+                  type="button"
+                  className="btn-ghost btn-small"
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Upload image"
+                >
+                  📎
+                </button>
+                <textarea
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder={isHealthy ? "Type a message... (Enter to send)" : "Server not running"}
+                  disabled={!isHealthy || isLoading}
+                  rows={1}
+                  className="chat-input"
+                />
+                <button
+                  type="submit"
+                  className="btn-primary"
+                  disabled={!isHealthy || isLoading || (!prompt.trim() && pendingImages.length === 0)}
+                >
+                  {isLoading ? '...' : '→'}
+                </button>
+              </form>
+            </>
+          ) : (
+            <div className="chat-empty">
+              <p>Select a conversation or create a new one</p>
+              <button className="btn-primary" onClick={createConversation}>
+                + New Conversation
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Main App
 function App() {
   const { stats, logs, connected, clearLogs } = useWebSocket();
@@ -2766,14 +4162,17 @@ function App() {
               Reconnecting to server...
             </div>
           )}
+          <StatsHeader stats={stats} />
           <Routes>
             <Route path="/" element={<Dashboard stats={stats} />} />
+            <Route path="/chat" element={<ChatPage stats={stats} />} />
             <Route path="/presets" element={<PresetsPage stats={stats} />} />
             <Route path="/models" element={<ModelsPage stats={stats} />} />
             <Route path="/download" element={<DownloadPage stats={stats} />} />
             <Route path="/logs" element={<LogsPage logs={logs} clearLogs={clearLogs} />} />
             <Route path="/processes" element={<ProcessesPage />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/docs" element={<DocsPage />} />
             <Route path="/api-docs" element={<ApiDocsPage />} />
           </Routes>
         </main>

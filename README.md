@@ -216,6 +216,59 @@ Enable lingering: `sudo loginctl enable-linger $USER`
 - Try reducing `modelsMax` in config.json
 - Try a smaller quantization (Q4 instead of Q5/Q6)
 
+## OpenCode Setup
+
+Llama Manager works with [OpenCode](https://opencode.ai) as an OpenAI-compatible provider.
+
+### Quick Setup
+
+Paste this prompt into OpenCode to have it configure itself:
+
+```
+Configure yourself to use my local Llama Manager as a provider. Create or update opencode.json with:
+- Provider ID: "llama-manager"
+- Use @ai-sdk/openai-compatible
+- Base URL: http://localhost:5250/api/v1
+- No API key needed (local server)
+
+Then fetch the available models from http://localhost:5250/api/v1/models and add them to the config.
+Set reasonable context limits based on the model names (32k for most, 128k for models with "128k" in name).
+```
+
+### Manual Configuration
+
+Add to your `opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "llama-manager": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Llama Manager",
+      "options": {
+        "baseURL": "http://localhost:5250/api/v1"
+      },
+      "models": {
+        "your-model-id": {
+          "name": "Your Model Name",
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Replace `your-model-id` with the actual model IDs from your loaded models. Get the list with:
+
+```bash
+curl http://localhost:5250/api/v1/models
+```
+
 ## MCP Server
 
 Llama Manager includes an MCP (Model Context Protocol) server for integration with AI agents like Claude Desktop.
@@ -277,3 +330,4 @@ Additional documentation is available in the [docs/](docs/) directory:
 - [Chat Page Design](docs/Designs/ChatPage.md) - Full chat interface design
 - [Docs Page Design](docs/Designs/DocsPage.md) - In-app documentation design
 - [API Docs Design](docs/Designs/ApiDocs.md) - API documentation enhancements
+- [OpenCode Integration](docs/Designs/OpenCode.md) - OpenCode AI setup and configuration

@@ -33,6 +33,13 @@ const API_PORT = process.env.API_PORT || 3001;
 const LLAMA_PORT = process.env.LLAMA_PORT || 8080;
 const LLAMA_UI_URL = process.env.LLAMA_UI_URL || null; // Optional override for llama.cpp UI URL
 
+// Python venv for huggingface CLI (created by install.sh)
+const VENV_PATH = join(PROJECT_ROOT, '.venv');
+// Newer versions use 'hf', older versions use 'huggingface-cli'
+const HF_CLI_PATH = existsSync(join(VENV_PATH, 'bin', 'hf'))
+  ? join(VENV_PATH, 'bin', 'hf')
+  : join(VENV_PATH, 'bin', 'huggingface-cli');
+
 // State
 let llamaProcess = null;
 let downloadProcesses = new Map();
@@ -336,7 +343,7 @@ async function getSystemStats() {
     downloads: Object.fromEntries(
       Array.from(downloadProcesses.entries()).map(([id, info]) => [
         id,
-        { progress: info.progress, status: info.status, error: info.error }
+        { progress: info.progress, status: info.status, error: info.error, output: info.output, startedAt: info.startedAt }
       ])
     )
   };
@@ -667,9 +674,23 @@ function stopStatsBroadcast() {
   }
 }
 
+// Check if a filename is a split model part (e.g., model-00002-of-00004.gguf)
+function isSplitModelPart(filename) {
+  // Match patterns like: name-00001-of-00004.gguf or name.Q4_K_M-00001-of-00002.gguf
+  const splitPattern = /-(\d{5})-of-(\d{5})\.gguf$/i;
+  const match = filename.match(splitPattern);
+  if (!match) return null;
+  return {
+    partNum: parseInt(match[1]),
+    totalParts: parseInt(match[2]),
+    baseName: filename.replace(splitPattern, '.gguf')
+  };
+}
+
 // Scan local models directory
 function scanLocalModels() {
   const models = [];
+  const splitModels = new Map(); // Track split models to combine them
 
   function scanDir(dir, prefix = '') {
     if (!existsSync(dir)) return;
@@ -681,18 +702,90 @@ function scanLocalModels() {
         scanDir(fullPath, prefix ? `${prefix}/${entry.name}` : entry.name);
       } else if (entry.name.endsWith('.gguf')) {
         const stats = statSync(fullPath);
-        models.push({
-          name: prefix ? `${prefix}/${entry.name}` : entry.name,
-          path: fullPath,
-          size: stats.size,
-          modified: stats.mtime
-        });
+        const modelName = prefix ? `${prefix}/${entry.name}` : entry.name;
+
+        // Check if this is a split model part
+        const splitInfo = isSplitModelPart(entry.name);
+        if (splitInfo) {
+          const baseModelName = prefix ? `${prefix}/${splitInfo.baseName}` : splitInfo.baseName;
+
+          if (!splitModels.has(baseModelName)) {
+            splitModels.set(baseModelName, {
+              name: baseModelName,
+              path: fullPath, // Use first part's path for loading
+              size: 0,
+              modified: stats.mtime,
+              parts: [],
+              totalParts: splitInfo.totalParts
+            });
+          }
+
+          const splitModel = splitModels.get(baseModelName);
+          splitModel.size += stats.size;
+          splitModel.parts.push({
+            partNum: splitInfo.partNum,
+            path: fullPath,
+            size: stats.size
+          });
+
+          // Update modified time to most recent
+          if (stats.mtime > splitModel.modified) {
+            splitModel.modified = stats.mtime;
+          }
+        } else {
+          // Regular single-file model
+          models.push({
+            name: modelName,
+            path: fullPath,
+            size: stats.size,
+            modified: stats.mtime
+          });
+        }
       }
     }
   }
 
   scanDir(MODELS_DIR);
-  return models;
+
+  // Add split models to the list (using first part's path for loading)
+  for (const [name, splitModel] of splitModels) {
+    // Sort parts and use the first part's path
+    splitModel.parts.sort((a, b) => a.partNum - b.partNum);
+    if (splitModel.parts.length > 0) {
+      splitModel.path = splitModel.parts[0].path;
+    }
+
+    // Only include if we have all parts
+    if (splitModel.parts.length === splitModel.totalParts) {
+      models.push({
+        name: splitModel.name,
+        path: splitModel.path,
+        size: splitModel.size,
+        modified: splitModel.modified,
+        isSplit: true,
+        partCount: splitModel.totalParts
+      });
+    } else {
+      // Incomplete split model - still show it but mark as incomplete
+      models.push({
+        name: splitModel.name,
+        path: splitModel.path,
+        size: splitModel.size,
+        modified: splitModel.modified,
+        isSplit: true,
+        partCount: splitModel.totalParts,
+        partsFound: splitModel.parts.length,
+        incomplete: true
+      });
+    }
+  }
+
+  // Add aliases from config
+  const aliases = config.modelAliases || {};
+  return models.map(model => ({
+    ...model,
+    alias: aliases[model.name] || null
+  }));
 }
 
 // API Routes
@@ -811,6 +904,44 @@ async function fetchLlamaStatus() {
     return { healthy: false };
   }
 }
+
+// Get model aliases
+app.get('/api/models/aliases', (req, res) => {
+  res.json({ aliases: config.modelAliases || {} });
+});
+
+// Set a model alias
+app.put('/api/models/aliases/:modelName(*)', (req, res) => {
+  const modelName = req.params.modelName;
+  const { alias } = req.body;
+
+  if (!config.modelAliases) {
+    config.modelAliases = {};
+  }
+
+  if (alias === null || alias === '') {
+    // Remove alias
+    delete config.modelAliases[modelName];
+  } else {
+    // Set alias
+    config.modelAliases[modelName] = alias;
+  }
+
+  saveConfig(config);
+  res.json({ success: true, aliases: config.modelAliases });
+});
+
+// Delete a model alias
+app.delete('/api/models/aliases/:modelName(*)', (req, res) => {
+  const modelName = req.params.modelName;
+
+  if (config.modelAliases && config.modelAliases[modelName]) {
+    delete config.modelAliases[modelName];
+    saveConfig(config);
+  }
+
+  res.json({ success: true, aliases: config.modelAliases || {} });
+});
 
 // Get models from llama-server (loaded/available)
 app.get('/api/models', async (req, res) => {
@@ -1148,7 +1279,7 @@ app.post('/api/pull', async (req, res) => {
     }
   }
 
-  const downloadInfo = { progress: 0, status: 'starting', output: '', error: null };
+  const downloadInfo = { progress: 0, status: 'starting', output: '', error: null, startedAt: new Date().toISOString() };
   downloadProcesses.set(downloadId, downloadInfo);
 
   try {
@@ -1156,20 +1287,25 @@ app.post('/api/pull', async (req, res) => {
     const targetDir = join(MODELS_DIR, repo.replace('/', '_'));
     mkdirSync(targetDir, { recursive: true });
 
-    // Build include arguments for huggingface-cli
-    const includeArgs = includePatterns.map(p => `--include "${p}"`).join(' ');
-    const downloadCommand = `huggingface-cli download "${repo}" ${includeArgs} --local-dir "${targetDir}" --local-dir-use-symlinks False`;
+    // Build include arguments for hf download
+    const includeArgs = includePatterns.flatMap(p => ['--include', p]);
+    const hfArgs = [
+      'download', repo,
+      ...includeArgs,
+      '--local-dir', targetDir
+    ];
 
-    console.log(`[download] Starting: ${downloadCommand}`);
+    console.log(`[download] Starting: ${HF_CLI_PATH} ${hfArgs.join(' ')}`);
     addLog('download', `Starting download: ${repo} (${includePatterns.join(', ')})`);
 
-    const downloadProcess = spawn('/usr/local/bin/distrobox', [
-      'enter', CONTAINER_NAME, '--',
-      'bash', '-c',
-      `export HF_HUB_ENABLE_HF_TRANSFER=1 && export HF_TOKEN="${process.env.HF_TOKEN || ''}" && ${downloadCommand} 2>&1`
-    ], {
+    // Run huggingface-cli from the project's venv
+    const downloadProcess = spawn(HF_CLI_PATH, hfArgs, {
       cwd: PROJECT_ROOT,
-      env: { ...process.env, PATH: '/usr/local/bin:/usr/bin:/bin' }
+      env: {
+        ...process.env,
+        HF_HUB_ENABLE_HF_TRANSFER: '1',
+        HF_TOKEN: process.env.HF_TOKEN || ''
+      }
     });
 
     downloadProcess.stdout.on('data', (data) => {
@@ -1200,6 +1336,7 @@ app.post('/api/pull', async (req, res) => {
     downloadProcess.stderr.on('data', (data) => {
       const output = data.toString();
       downloadInfo.output += output;
+      downloadInfo.status = 'downloading';
 
       // HF CLI outputs progress to stderr
       const progressMatch = output.match(/(\d+)%/);
@@ -1212,14 +1349,36 @@ app.post('/api/pull', async (req, res) => {
       }
     });
 
+    downloadProcess.on('error', (err) => {
+      console.error(`[download] Process error: ${err.message}`);
+      downloadInfo.status = 'failed';
+      if (err.code === 'ENOENT') {
+        downloadInfo.error = `huggingface-cli not found. Run ./install.sh to set up the Python environment.`;
+      } else {
+        downloadInfo.error = `Failed to start download: ${err.message}`;
+      }
+      downloadInfo.output += `\nError: ${err.message}`;
+      addLog('download', `Download failed: ${repo} (${err.message})`);
+      // Keep the info for 5 minutes then clean up
+      setTimeout(() => downloadProcesses.delete(downloadId), 300000);
+    });
+
     downloadProcess.on('exit', (code) => {
       if (code === 0) {
         downloadInfo.status = 'completed';
         downloadInfo.progress = 100;
         addLog('download', `Download completed: ${repo}`);
-      } else {
+      } else if (downloadInfo.status !== 'failed') {
+        // Only update if not already failed by error event
         downloadInfo.status = 'failed';
-        downloadInfo.error = `Process exited with code ${code}. Check logs for details.`;
+        // Provide helpful error messages for common exit codes
+        let errorMsg = `Process exited with code ${code}.`;
+        if (code === 127) {
+          errorMsg = `Command not found (exit code 127). Run ./install.sh to set up the Python environment.`;
+        } else if (code === 1) {
+          errorMsg = `Download failed (exit code 1). Check output for details - this may be an authentication issue (set HF_TOKEN env var) or network problem.`;
+        }
+        downloadInfo.error = errorMsg;
         addLog('download', `Download failed: ${repo} (code ${code})`);
       }
       // Keep the info for 5 minutes then clean up
@@ -1247,8 +1406,39 @@ app.get('/api/pull/:downloadId(*)', (req, res) => {
     downloadId,
     progress: info.progress,
     status: info.status,
-    error: info.error
+    error: info.error,
+    output: info.output
   });
+});
+
+// Get all downloads
+app.get('/api/downloads', (req, res) => {
+  const downloads = Array.from(downloadProcesses.entries()).map(([id, info]) => ({
+    id,
+    progress: info.progress,
+    status: info.status,
+    error: info.error,
+    output: info.output,
+    startedAt: info.startedAt
+  }));
+  res.json({ downloads });
+});
+
+// Clear a completed/failed download
+app.delete('/api/downloads/:downloadId(*)', (req, res) => {
+  const downloadId = req.params.downloadId;
+  const info = downloadProcesses.get(downloadId);
+
+  if (!info) {
+    return res.status(404).json({ error: 'Download not found' });
+  }
+
+  if (info.status === 'downloading' || info.status === 'starting') {
+    return res.status(400).json({ error: 'Cannot clear active download' });
+  }
+
+  downloadProcesses.delete(downloadId);
+  res.json({ success: true });
 });
 
 // Search HuggingFace for GGUF models
@@ -1304,15 +1494,22 @@ app.get('/api/repo/:author/:model/files', async (req, res) => {
   }
 });
 
-// List repo files using huggingface-cli
+// List repo files using huggingface CLI (from project venv)
 async function listRepoFilesWithCli(repoId) {
   return new Promise((resolve) => {
-    const cmd = spawn('/usr/local/bin/distrobox', [
-      'enter', CONTAINER_NAME, '--',
-      'bash', '-c',
-      `huggingface-cli repo info "${repoId}" --files 2>/dev/null | grep -E '\\.gguf$' || true`
-    ], {
-      env: { ...process.env, PATH: '/usr/local/bin:/usr/bin:/bin', HF_TOKEN: process.env.HF_TOKEN || '' },
+    // Check if hf CLI exists in venv
+    if (!existsSync(HF_CLI_PATH)) {
+      console.log('[repo/files] HuggingFace CLI not found in venv, falling back to API');
+      resolve([]);
+      return;
+    }
+
+    // Use 'hf models info --expand=siblings' to get file listing as JSON
+    const cmd = spawn(HF_CLI_PATH, ['models', 'info', repoId, '--expand=siblings'], {
+      env: {
+        ...process.env,
+        HF_TOKEN: process.env.HF_TOKEN || ''
+      },
       stdio: ['ignore', 'pipe', 'pipe']
     });
 
@@ -1334,32 +1531,24 @@ async function listRepoFilesWithCli(repoId) {
         return;
       }
 
-      // Parse the output - each line is a file path with size
+      // Parse JSON output and extract gguf files from siblings
       const files = [];
-      const lines = output.trim().split('\n');
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.endsWith('.gguf')) continue;
-
-        // Format could be "filename (size)" or just "filename"
-        const match = trimmed.match(/^(.+\.gguf)(?:\s+\(([^)]+)\))?$/);
-        if (match) {
-          const path = match[1].trim();
-          const sizeStr = match[2] || '';
-          let size = 0;
-
-          // Parse size like "4.5 GB" or "500 MB"
-          const sizeMatch = sizeStr.match(/([\d.]+)\s*(GB|MB|KB|B)?/i);
-          if (sizeMatch) {
-            const num = parseFloat(sizeMatch[1]);
-            const unit = (sizeMatch[2] || 'B').toUpperCase();
-            const multipliers = { 'B': 1, 'KB': 1024, 'MB': 1024*1024, 'GB': 1024*1024*1024 };
-            size = Math.round(num * (multipliers[unit] || 1));
+      try {
+        const data = JSON.parse(output);
+        const siblings = data.siblings || [];
+        for (const sibling of siblings) {
+          const filename = sibling.rfilename || sibling.path || '';
+          if (filename.endsWith('.gguf')) {
+            files.push({
+              path: filename,
+              size: sibling.size || 0
+            });
           }
-
-          files.push({ path, size });
         }
+      } catch (e) {
+        console.log('[repo/files] Failed to parse CLI JSON output, falling back to API');
+        resolve([]);
+        return;
       }
 
       resolve(files);

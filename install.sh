@@ -65,6 +65,44 @@ if [ "$NODE_VERSION" -lt 18 ]; then
     exit 1
 fi
 
+# Set up Python venv for huggingface-cli
+VENV_DIR="$SCRIPT_DIR/.venv"
+VENV_PIP="$VENV_DIR/bin/pip"
+
+# Create or recreate venv if pip is missing
+if [ ! -f "$VENV_PIP" ]; then
+    echo "Creating Python virtual environment for HuggingFace CLI..."
+    if command -v python3 &> /dev/null; then
+        # Remove incomplete venv if it exists
+        [ -d "$VENV_DIR" ] && rm -rf "$VENV_DIR"
+        python3 -m venv "$VENV_DIR"
+        if [ ! -f "$VENV_PIP" ]; then
+            echo "  venv created without pip, bootstrapping pip..."
+            curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV_DIR/bin/python"
+        fi
+    else
+        echo "Warning: python3 not found. HuggingFace model downloads will not work."
+        echo "Install with: sudo apt install python3 python3-venv"
+    fi
+fi
+
+# Install huggingface-cli in venv
+if [ -f "$VENV_PIP" ]; then
+    echo "Installing huggingface-hub in virtual environment..."
+    "$VENV_PIP" install --upgrade pip
+    "$VENV_PIP" install huggingface-hub hf_transfer
+    # Check for either 'hf' (new) or 'huggingface-cli' (old)
+    if [ -f "$VENV_DIR/bin/hf" ]; then
+        echo "  HuggingFace CLI installed: $VENV_DIR/bin/hf"
+    elif [ -f "$VENV_DIR/bin/huggingface-cli" ]; then
+        echo "  HuggingFace CLI installed: $VENV_DIR/bin/huggingface-cli"
+    else
+        echo "  Warning: HuggingFace CLI installation may have failed"
+    fi
+else
+    echo "Warning: Could not set up Python venv. HuggingFace downloads will not work."
+fi
+
 # Check if service is already running
 SERVICE_WAS_RUNNING=false
 SERVICE_WAS_ENABLED=false
