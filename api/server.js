@@ -39,17 +39,55 @@ let downloadProcesses = new Map();
 let currentMode = 'router'; // 'router' or 'single'
 let currentPreset = null;
 
+// Analytics data storage (circular buffers for time-series data)
+const MAX_ANALYTICS_POINTS = 300; // 5 minutes at 1 second intervals
+const analyticsData = {
+  temperature: [],   // { timestamp, gpu, cpu }
+  power: [],         // { timestamp, watts }
+  memory: [],        // { timestamp, vram, gtt, system }
+  tokens: []         // { timestamp, promptTokens, completionTokens, tokensPerSecond, model }
+};
+
+// Token stats aggregation
+const tokenStats = {
+  totalPromptTokens: 0,
+  totalCompletionTokens: 0,
+  totalRequests: 0,
+  recentRequests: [] // Last 100 requests for averaging
+};
+const MAX_RECENT_REQUESTS = 100;
+
 // Log buffer (circular buffer for recent logs)
 const MAX_LOG_LINES = 500;
 let logBuffer = [];
 let lastLogEntry = null;
 let lastLogCount = 0;
 
+// Default log patterns to filter out (noisy polling endpoints)
+const DEFAULT_LOG_FILTERS = [
+  'GET /health.*200',
+  'GET /models\\s+200',
+];
+
+function shouldFilterLog(line, customFilters = []) {
+  const allFilters = [...DEFAULT_LOG_FILTERS, ...customFilters];
+  return allFilters.some(pattern => {
+    try {
+      return new RegExp(pattern, 'i').test(line);
+    } catch {
+      // Invalid regex, try as plain string match
+      return line.includes(pattern);
+    }
+  });
+}
+
 function addLog(source, message) {
   const timestamp = new Date().toISOString();
   const lines = message.toString().split('\n').filter(l => l.trim());
 
   for (const line of lines) {
+    // Skip noisy polling log entries
+    if (shouldFilterLog(line, config.logFilters || [])) continue;
     // Check if this is a repeat of the last message
     if (lastLogEntry && lastLogEntry.source === source && lastLogEntry.message === line) {
       lastLogCount++;
@@ -86,6 +124,41 @@ function broadcastLog(logEntry) {
       client.send(message);
     }
   }
+}
+
+// Add analytics data point
+function addAnalyticsPoint(category, data) {
+  const point = { timestamp: Date.now(), ...data };
+  analyticsData[category].push(point);
+  if (analyticsData[category].length > MAX_ANALYTICS_POINTS) {
+    analyticsData[category].shift();
+  }
+}
+
+// Record token stats from a completion
+function recordTokenStats(stats) {
+  const { promptTokens, completionTokens, tokensPerSecond, model, duration } = stats;
+
+  tokenStats.totalPromptTokens += promptTokens || 0;
+  tokenStats.totalCompletionTokens += completionTokens || 0;
+  tokenStats.totalRequests++;
+
+  const requestRecord = {
+    timestamp: Date.now(),
+    promptTokens: promptTokens || 0,
+    completionTokens: completionTokens || 0,
+    tokensPerSecond: tokensPerSecond || 0,
+    model: model || 'unknown',
+    duration: duration || 0
+  };
+
+  tokenStats.recentRequests.push(requestRecord);
+  if (tokenStats.recentRequests.length > MAX_RECENT_REQUESTS) {
+    tokenStats.recentRequests.shift();
+  }
+
+  // Add to time-series
+  addAnalyticsPoint('tokens', requestRecord);
 }
 
 // Optimized single-model presets
@@ -158,7 +231,8 @@ function loadConfig() {
   const defaultConfig = {
     autoStart: process.env.AUTO_START !== 'false',
     modelsMax: parseInt(process.env.MODELS_MAX) || 2,
-    contextSize: parseInt(process.env.CONTEXT_SIZE) || 8192
+    contextSize: parseInt(process.env.CONTEXT_SIZE) || 8192,
+    logFilters: []
   };
   saveConfig(defaultConfig);
   return defaultConfig;
@@ -543,6 +617,28 @@ async function broadcastStats() {
 
   try {
     const stats = await getSystemStats();
+
+    // Record analytics data points
+    if (stats.gpu) {
+      addAnalyticsPoint('temperature', {
+        gpu: stats.gpu.temperature || 0,
+        cpu: stats.cpu?.temperature || 0
+      });
+      addAnalyticsPoint('power', {
+        watts: stats.gpu.power || 0
+      });
+      addAnalyticsPoint('memory', {
+        vram: stats.gpu.vram?.usage || 0,
+        gtt: stats.gpu.gtt?.usage || 0,
+        system: stats.memory?.usage || 0
+      });
+    } else if (stats.cpu?.temperature) {
+      addAnalyticsPoint('temperature', {
+        gpu: 0,
+        cpu: stats.cpu.temperature
+      });
+    }
+
     const message = JSON.stringify({ type: 'stats', data: stats });
 
     for (const client of connectedClients) {
@@ -953,7 +1049,8 @@ app.post('/api/presets/:presetId/activate', async (req, res) => {
     const env = {
       ...process.env,
       PRESET_ID: presetId,
-      PORT: String(LLAMA_PORT)
+      PORT: String(LLAMA_PORT),
+      MODELS_DIR
     };
 
     llamaProcess = spawn('bash', [startScript], {
@@ -1007,19 +1104,37 @@ app.post('/api/server/stop', async (req, res) => {
 });
 
 // Download a model from HuggingFace to ~/models
-// Automatically downloads all parts for split models
+// Supports: quantization pattern, specific filename, or all GGUF files
 app.post('/api/pull', async (req, res) => {
-  const { repo, quantization } = req.body;
+  const { repo, quantization, filename, pattern } = req.body;
 
   if (!repo) {
     return res.status(400).json({ error: 'Missing repo parameter' });
   }
 
-  if (!quantization) {
-    return res.status(400).json({ error: 'Missing quantization parameter' });
-  }
+  // Determine what to download
+  let includePatterns = [];
+  let downloadId = repo;
 
-  const downloadId = `${repo}:${quantization}`;
+  if (filename) {
+    // Download specific file
+    includePatterns = [filename];
+    downloadId = `${repo}:${filename}`;
+  } else if (quantization) {
+    // Download by quantization pattern
+    const quant = quantization.toUpperCase();
+    const quantLower = quantization.toLowerCase();
+    includePatterns = [`*${quant}*.gguf`, `*${quantLower}*.gguf`];
+    downloadId = `${repo}:${quantization}`;
+  } else if (pattern) {
+    // Custom pattern
+    includePatterns = [pattern];
+    downloadId = `${repo}:${pattern}`;
+  } else {
+    // Download all GGUF files
+    includePatterns = ['*.gguf'];
+    downloadId = `${repo}:all`;
+  }
 
   if (downloadProcesses.has(downloadId)) {
     const existing = downloadProcesses.get(downloadId);
@@ -1041,22 +1156,17 @@ app.post('/api/pull', async (req, res) => {
     const targetDir = join(MODELS_DIR, repo.replace('/', '_'));
     mkdirSync(targetDir, { recursive: true });
 
-    // Build pattern to match quantization (case-insensitive via shell)
-    // This will match both single files and split files (e.g., *Q5_K_M*.gguf)
-    const quant = quantization.toUpperCase();
-    // Use case-insensitive pattern by matching both cases
-    const quantLower = quantization.toLowerCase();
-    const includePattern = `*[${quant[0]}${quant[0].toLowerCase()}]${quant.slice(1)}*.gguf *[${quantLower[0]}${quantLower[0].toUpperCase()}]${quantLower.slice(1)}*.gguf`;
-
-    // Simpler approach: just use the quantization directly, HF CLI handles it
-    const downloadCommand = `huggingface-cli download "${repo}" --include "*${quant}*.gguf" "*${quantLower}*.gguf" --local-dir "${targetDir}" --local-dir-use-symlinks False`;
+    // Build include arguments for huggingface-cli
+    const includeArgs = includePatterns.map(p => `--include "${p}"`).join(' ');
+    const downloadCommand = `huggingface-cli download "${repo}" ${includeArgs} --local-dir "${targetDir}" --local-dir-use-symlinks False`;
 
     console.log(`[download] Starting: ${downloadCommand}`);
+    addLog('download', `Starting download: ${repo} (${includePatterns.join(', ')})`);
 
     const downloadProcess = spawn('/usr/local/bin/distrobox', [
       'enter', CONTAINER_NAME, '--',
       'bash', '-c',
-      `export HF_HUB_ENABLE_HF_TRANSFER=1 && ${downloadCommand} 2>&1`
+      `export HF_HUB_ENABLE_HF_TRANSFER=1 && export HF_TOKEN="${process.env.HF_TOKEN || ''}" && ${downloadCommand} 2>&1`
     ], {
       cwd: PROJECT_ROOT,
       env: { ...process.env, PATH: '/usr/local/bin:/usr/bin:/bin' }
@@ -1068,38 +1178,55 @@ app.post('/api/pull', async (req, res) => {
       downloadInfo.status = 'downloading';
 
       // Parse progress from huggingface-cli output
+      // Look for patterns like "50%|" or "Downloading: 50%"
       const progressMatch = output.match(/(\d+)%/);
       if (progressMatch) {
         downloadInfo.progress = parseInt(progressMatch[1]);
       }
 
       // Check for completion indicators
-      if (output.includes('Download complete') || output.includes('already exists')) {
-        downloadInfo.progress = 100;
+      if (output.includes('Download complete') || output.includes('already exists') || output.includes('Fetching')) {
+        if (output.includes('100%')) {
+          downloadInfo.progress = 100;
+        }
       }
 
-      console.log(`[download] ${output}`);
+      // Log important messages
+      if (output.includes('Downloading') || output.includes('Error') || output.includes('complete')) {
+        console.log(`[download] ${output.trim()}`);
+      }
     });
 
     downloadProcess.stderr.on('data', (data) => {
       const output = data.toString();
       downloadInfo.output += output;
-      console.error(`[download] ${output}`);
+
+      // HF CLI outputs progress to stderr
+      const progressMatch = output.match(/(\d+)%/);
+      if (progressMatch) {
+        downloadInfo.progress = parseInt(progressMatch[1]);
+      }
+
+      if (output.includes('Error') || output.includes('error')) {
+        console.error(`[download] ${output}`);
+      }
     });
 
     downloadProcess.on('exit', (code) => {
       if (code === 0) {
         downloadInfo.status = 'completed';
         downloadInfo.progress = 100;
+        addLog('download', `Download completed: ${repo}`);
       } else {
         downloadInfo.status = 'failed';
-        downloadInfo.error = `Process exited with code ${code}`;
+        downloadInfo.error = `Process exited with code ${code}. Check logs for details.`;
+        addLog('download', `Download failed: ${repo} (code ${code})`);
       }
       // Keep the info for 5 minutes then clean up
       setTimeout(() => downloadProcesses.delete(downloadId), 300000);
     });
 
-    res.json({ success: true, downloadId, status: 'started', targetDir });
+    res.json({ success: true, downloadId, status: 'started', targetDir, patterns: includePatterns });
   } catch (error) {
     downloadInfo.status = 'failed';
     downloadInfo.error = error.message;
@@ -1153,62 +1280,167 @@ app.get('/api/search', async (req, res) => {
 });
 
 // Get files in a HuggingFace repo (to find quantizations)
-// Groups multi-part files together
+// Uses huggingface-cli for reliable file listing
 app.get('/api/repo/:author/:model/files', async (req, res) => {
   const { author, model } = req.params;
+  const repoId = `${author}/${model}`;
 
   try {
-    const filesUrl = `https://huggingface.co/api/models/${author}/${model}/tree/main`;
-    const response = await fetch(filesUrl);
+    // First try using huggingface-cli to list files (more reliable)
+    const files = await listRepoFilesWithCli(repoId);
 
-    if (!response.ok) {
-      return res.status(response.status).json({ error: 'Failed to fetch repo files' });
+    if (files.length > 0) {
+      const quantizations = groupFilesByQuantization(files);
+      return res.json({ quantizations });
     }
 
-    const files = await response.json();
-
-    // Filter to GGUF files
-    const ggufFiles = files.filter(f => f.path && f.path.endsWith('.gguf'));
-
-    // Group files by quantization (handling multi-part files)
-    const quantizations = new Map();
-
-    for (const file of ggufFiles) {
-      const quant = extractQuantization(file.path);
-      if (!quant) continue;
-
-      // Check if this is a split file (e.g., model-00001-of-00003.gguf)
-      const splitMatch = file.path.match(/[-_](\d{5})-of-(\d{5})\.gguf$/i);
-
-      if (!quantizations.has(quant)) {
-        quantizations.set(quant, {
-          quantization: quant,
-          files: [],
-          totalSize: 0,
-          isSplit: false,
-          totalParts: 1
-        });
-      }
-
-      const entry = quantizations.get(quant);
-      entry.files.push(file.path);
-      entry.totalSize += file.size || 0;
-
-      if (splitMatch) {
-        entry.isSplit = true;
-        entry.totalParts = parseInt(splitMatch[2]);
-      }
-    }
-
-    // Convert to array and sort by quantization name
-    const result = Array.from(quantizations.values())
-      .sort((a, b) => a.quantization.localeCompare(b.quantization));
-
-    res.json({ quantizations: result });
+    // Fallback to API with recursive tree fetching
+    const apiFiles = await fetchRepoFilesRecursive(repoId);
+    const quantizations = groupFilesByQuantization(apiFiles);
+    res.json({ quantizations });
   } catch (error) {
+    console.error('[repo/files] Error:', error);
     res.status(500).json({ error: error.message });
   }
 });
+
+// List repo files using huggingface-cli
+async function listRepoFilesWithCli(repoId) {
+  return new Promise((resolve) => {
+    const cmd = spawn('/usr/local/bin/distrobox', [
+      'enter', CONTAINER_NAME, '--',
+      'bash', '-c',
+      `huggingface-cli repo info "${repoId}" --files 2>/dev/null | grep -E '\\.gguf$' || true`
+    ], {
+      env: { ...process.env, PATH: '/usr/local/bin:/usr/bin:/bin', HF_TOKEN: process.env.HF_TOKEN || '' },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    let output = '';
+    let errorOutput = '';
+
+    cmd.stdout.on('data', (data) => {
+      output += data.toString();
+    });
+
+    cmd.stderr.on('data', (data) => {
+      errorOutput += data.toString();
+    });
+
+    cmd.on('close', (code) => {
+      if (code !== 0 || !output.trim()) {
+        console.log('[repo/files] CLI failed or no output, falling back to API');
+        resolve([]);
+        return;
+      }
+
+      // Parse the output - each line is a file path with size
+      const files = [];
+      const lines = output.trim().split('\n');
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.endsWith('.gguf')) continue;
+
+        // Format could be "filename (size)" or just "filename"
+        const match = trimmed.match(/^(.+\.gguf)(?:\s+\(([^)]+)\))?$/);
+        if (match) {
+          const path = match[1].trim();
+          const sizeStr = match[2] || '';
+          let size = 0;
+
+          // Parse size like "4.5 GB" or "500 MB"
+          const sizeMatch = sizeStr.match(/([\d.]+)\s*(GB|MB|KB|B)?/i);
+          if (sizeMatch) {
+            const num = parseFloat(sizeMatch[1]);
+            const unit = (sizeMatch[2] || 'B').toUpperCase();
+            const multipliers = { 'B': 1, 'KB': 1024, 'MB': 1024*1024, 'GB': 1024*1024*1024 };
+            size = Math.round(num * (multipliers[unit] || 1));
+          }
+
+          files.push({ path, size });
+        }
+      }
+
+      resolve(files);
+    });
+
+    cmd.on('error', () => resolve([]));
+    setTimeout(() => resolve([]), 15000);
+  });
+}
+
+// Recursively fetch files from HuggingFace API
+async function fetchRepoFilesRecursive(repoId, path = '') {
+  const allFiles = [];
+
+  try {
+    const url = `https://huggingface.co/api/models/${repoId}/tree/main${path ? '/' + path : ''}`;
+    const response = await fetch(url, {
+      headers: process.env.HF_TOKEN ? { 'Authorization': `Bearer ${process.env.HF_TOKEN}` } : {}
+    });
+
+    if (!response.ok) {
+      console.error(`[repo/files] API error for ${url}: ${response.status}`);
+      return allFiles;
+    }
+
+    const items = await response.json();
+
+    for (const item of items) {
+      if (item.type === 'directory') {
+        // Recursively fetch subdirectory
+        const subFiles = await fetchRepoFilesRecursive(repoId, item.path);
+        allFiles.push(...subFiles);
+      } else if (item.path && item.path.endsWith('.gguf')) {
+        allFiles.push({
+          path: item.path,
+          size: item.size || 0
+        });
+      }
+    }
+  } catch (error) {
+    console.error(`[repo/files] Error fetching ${path}:`, error.message);
+  }
+
+  return allFiles;
+}
+
+// Group files by quantization
+function groupFilesByQuantization(files) {
+  const quantizations = new Map();
+
+  for (const file of files) {
+    const quant = extractQuantization(file.path);
+    if (!quant) continue;
+
+    // Check if this is a split file (e.g., model-00001-of-00003.gguf)
+    const splitMatch = file.path.match(/[-_](\d{5})-of-(\d{5})\.gguf$/i);
+
+    if (!quantizations.has(quant)) {
+      quantizations.set(quant, {
+        quantization: quant,
+        files: [],
+        totalSize: 0,
+        isSplit: false,
+        totalParts: 1
+      });
+    }
+
+    const entry = quantizations.get(quant);
+    entry.files.push(file.path);
+    entry.totalSize += file.size || 0;
+
+    if (splitMatch) {
+      entry.isSplit = true;
+      entry.totalParts = parseInt(splitMatch[2]);
+    }
+  }
+
+  // Convert to array and sort by quantization name
+  return Array.from(quantizations.values())
+    .sort((a, b) => a.quantization.localeCompare(b.quantization));
+}
 
 function extractQuantization(filename) {
   // Remove split suffix first for matching
@@ -1256,6 +1488,67 @@ app.get('/api/logs', (req, res) => {
   const limit = parseInt(req.query.limit) || 100;
   const logs = logBuffer.slice(-limit);
   res.json({ logs });
+});
+
+// Get log filters
+app.get('/api/logs/filters', (req, res) => {
+  res.json({
+    defaultFilters: DEFAULT_LOG_FILTERS,
+    customFilters: config.logFilters || []
+  });
+});
+
+// Add a log filter
+app.post('/api/logs/filters', (req, res) => {
+  const { pattern } = req.body;
+
+  if (!pattern || typeof pattern !== 'string') {
+    return res.status(400).json({ error: 'Missing or invalid pattern' });
+  }
+
+  // Validate regex
+  try {
+    new RegExp(pattern);
+  } catch (e) {
+    return res.status(400).json({ error: `Invalid regex pattern: ${e.message}` });
+  }
+
+  if (!config.logFilters) {
+    config.logFilters = [];
+  }
+
+  // Avoid duplicates
+  if (config.logFilters.includes(pattern)) {
+    return res.json({ success: true, message: 'Filter already exists', filters: config.logFilters });
+  }
+
+  config.logFilters.push(pattern);
+  saveConfig(config);
+
+  res.json({ success: true, filters: config.logFilters });
+});
+
+// Remove a log filter
+app.delete('/api/logs/filters', (req, res) => {
+  const { pattern } = req.body;
+
+  if (!pattern) {
+    return res.status(400).json({ error: 'Missing pattern' });
+  }
+
+  if (!config.logFilters) {
+    config.logFilters = [];
+  }
+
+  const index = config.logFilters.indexOf(pattern);
+  if (index === -1) {
+    return res.status(404).json({ error: 'Filter not found' });
+  }
+
+  config.logFilters.splice(index, 1);
+  saveConfig(config);
+
+  res.json({ success: true, filters: config.logFilters });
 });
 
 // Helper to get container info for a process
@@ -1389,6 +1682,244 @@ app.post('/api/processes/:pid/kill', async (req, res) => {
     res.json({ success: true, message: `Process ${pid} killed` });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// OpenAI API Wrapper (/api/v1/*)
+// Proxies to llama.cpp server and tracks stats
+// ============================================
+
+// Get analytics data
+app.get('/api/analytics', (req, res) => {
+  const minutes = parseInt(req.query.minutes) || 5;
+  const cutoff = Date.now() - (minutes * 60 * 1000);
+
+  res.json({
+    temperature: analyticsData.temperature.filter(p => p.timestamp > cutoff),
+    power: analyticsData.power.filter(p => p.timestamp > cutoff),
+    memory: analyticsData.memory.filter(p => p.timestamp > cutoff),
+    tokens: analyticsData.tokens.filter(p => p.timestamp > cutoff),
+    tokenStats: {
+      totalPromptTokens: tokenStats.totalPromptTokens,
+      totalCompletionTokens: tokenStats.totalCompletionTokens,
+      totalRequests: tokenStats.totalRequests,
+      averageTokensPerSecond: tokenStats.recentRequests.length > 0
+        ? tokenStats.recentRequests.reduce((sum, r) => sum + r.tokensPerSecond, 0) / tokenStats.recentRequests.length
+        : 0
+    }
+  });
+});
+
+// OpenAI-compatible models endpoint
+app.get('/api/v1/models', async (req, res) => {
+  try {
+    const response = await fetch(`http://localhost:${LLAMA_PORT}/v1/models`);
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    res.status(502).json({ error: 'Failed to reach llama server', details: error.message });
+  }
+});
+
+// OpenAI-compatible chat completions (streaming and non-streaming)
+app.post('/api/v1/chat/completions', async (req, res) => {
+  const startTime = Date.now();
+  const isStreaming = req.body.stream === true;
+
+  try {
+    const response = await fetch(`http://localhost:${LLAMA_PORT}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      return res.status(response.status).send(error);
+    }
+
+    if (isStreaming) {
+      // Stream the response and track tokens
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let completionTokens = 0;
+      let promptTokens = 0;
+      let model = req.body.model || 'unknown';
+
+      const processStream = async () => {
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value);
+            res.write(chunk);
+
+            // Parse SSE data to count tokens
+            const lines = chunk.split('\n');
+            for (const line of lines) {
+              if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  if (data.choices?.[0]?.delta?.content) {
+                    completionTokens++;
+                  }
+                  if (data.usage) {
+                    promptTokens = data.usage.prompt_tokens || promptTokens;
+                    completionTokens = data.usage.completion_tokens || completionTokens;
+                  }
+                  if (data.model) {
+                    model = data.model;
+                  }
+                } catch (e) {
+                  // Skip parse errors
+                }
+              }
+            }
+          }
+          res.end();
+
+          // Record stats after stream completes
+          const duration = Date.now() - startTime;
+          const tokensPerSecond = duration > 0 ? (completionTokens / (duration / 1000)) : 0;
+          recordTokenStats({
+            promptTokens,
+            completionTokens,
+            tokensPerSecond,
+            model,
+            duration
+          });
+        } catch (e) {
+          console.error('[proxy] Stream error:', e);
+          res.end();
+        }
+      };
+
+      processStream();
+    } else {
+      // Non-streaming response
+      const data = await response.json();
+
+      // Extract token stats from response
+      const duration = Date.now() - startTime;
+      const usage = data.usage || {};
+      const promptTokens = usage.prompt_tokens || 0;
+      const completionTokens = usage.completion_tokens || 0;
+      const tokensPerSecond = duration > 0 ? (completionTokens / (duration / 1000)) : 0;
+
+      recordTokenStats({
+        promptTokens,
+        completionTokens,
+        tokensPerSecond,
+        model: data.model || req.body.model || 'unknown',
+        duration
+      });
+
+      // Add our tracking info to response
+      data._llama_manager = {
+        duration,
+        tokensPerSecond: Math.round(tokensPerSecond * 10) / 10
+      };
+
+      res.json(data);
+    }
+  } catch (error) {
+    res.status(502).json({ error: 'Failed to reach llama server', details: error.message });
+  }
+});
+
+// OpenAI-compatible completions (legacy endpoint)
+app.post('/api/v1/completions', async (req, res) => {
+  const startTime = Date.now();
+
+  try {
+    const response = await fetch(`http://localhost:${LLAMA_PORT}/v1/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      return res.status(response.status).send(error);
+    }
+
+    if (req.body.stream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let tokens = 0;
+
+      const processStream = async () => {
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            res.write(decoder.decode(value));
+            tokens++;
+          }
+          res.end();
+
+          const duration = Date.now() - startTime;
+          recordTokenStats({
+            promptTokens: 0,
+            completionTokens: tokens,
+            tokensPerSecond: duration > 0 ? tokens / (duration / 1000) : 0,
+            model: req.body.model || 'unknown',
+            duration
+          });
+        } catch (e) {
+          res.end();
+        }
+      };
+
+      processStream();
+    } else {
+      const data = await response.json();
+      const duration = Date.now() - startTime;
+      const usage = data.usage || {};
+
+      recordTokenStats({
+        promptTokens: usage.prompt_tokens || 0,
+        completionTokens: usage.completion_tokens || 0,
+        tokensPerSecond: duration > 0 ? (usage.completion_tokens || 0) / (duration / 1000) : 0,
+        model: data.model || req.body.model || 'unknown',
+        duration
+      });
+
+      res.json(data);
+    }
+  } catch (error) {
+    res.status(502).json({ error: 'Failed to reach llama server', details: error.message });
+  }
+});
+
+// OpenAI-compatible embeddings endpoint
+app.post('/api/v1/embeddings', async (req, res) => {
+  try {
+    const response = await fetch(`http://localhost:${LLAMA_PORT}/v1/embeddings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      return res.status(response.status).send(error);
+    }
+
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    res.status(502).json({ error: 'Failed to reach llama server', details: error.message });
   }
 });
 

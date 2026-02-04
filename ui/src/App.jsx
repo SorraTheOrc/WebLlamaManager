@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom';
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart
+} from 'recharts';
 import './App.css';
 
 const API_BASE = '/api';
@@ -106,7 +109,10 @@ function Sidebar({ stats }) {
   return (
     <nav className="sidebar">
       <div className="sidebar-header">
-        <h1>Llama Manager</h1>
+        <div className="sidebar-title">
+          <img src="/favicon/favicon-32x32.png" alt="Llama" className="sidebar-logo" />
+          <h1>Llama Manager</h1>
+        </div>
         <div className={`status-indicator ${isHealthy ? 'healthy' : stats?.mode ? 'starting' : 'stopped'}`}>
           <span className="status-dot" />
           <span>{isHealthy ? 'Running' : stats?.mode ? 'Starting' : 'Stopped'}</span>
@@ -141,6 +147,10 @@ function Sidebar({ stats }) {
         <NavLink to="/settings" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
           <span className="nav-icon">&#x2699;</span>
           Settings
+        </NavLink>
+        <NavLink to="/api-docs" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+          <span className="nav-icon">&#x1F4D6;</span>
+          API Docs
         </NavLink>
       </div>
 
@@ -210,10 +220,182 @@ function ProgressRing({ value, size = 80, strokeWidth = 8, color = 'var(--accent
   );
 }
 
+// Color definitions for charts
+const CHART_COLORS = {
+  temperature: '#ef4444',
+  temperatureCpu: '#f59e0b',
+  power: '#f59e0b',
+  memory: '#22c55e',
+  memorySecondary: '#8b5cf6',
+  tokens: '#3b82f6'
+};
+
+// Custom tooltip for charts
+function ChartTooltip({ active, payload, label, unit = '' }) {
+  if (!active || !payload || !payload.length) return null;
+
+  const formatTime = (ts) => {
+    const date = new Date(ts);
+    return date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  };
+
+  return (
+    <div className="chart-tooltip">
+      <div className="chart-tooltip-time">{formatTime(label)}</div>
+      {payload.map((entry, i) => (
+        <div key={i} className="chart-tooltip-row">
+          <span className="chart-tooltip-dot" style={{ background: entry.color }} />
+          <span className="chart-tooltip-label">{entry.name}:</span>
+          <span className="chart-tooltip-value">{entry.value?.toFixed(1)}{unit}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Temperature Chart Component
+function TemperatureChart({ data, height = 140 }) {
+  if (!data || data.length < 2) {
+    return (
+      <div className="chart-container" style={{ height }}>
+        <div className="chart-empty">Collecting data...</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="chart-container" style={{ height }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={data} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
+          <defs>
+            <linearGradient id="gradGpu" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor={CHART_COLORS.temperature} stopOpacity={0.3} />
+              <stop offset="95%" stopColor={CHART_COLORS.temperature} stopOpacity={0} />
+            </linearGradient>
+            <linearGradient id="gradCpu" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor={CHART_COLORS.temperatureCpu} stopOpacity={0.2} />
+              <stop offset="95%" stopColor={CHART_COLORS.temperatureCpu} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" />
+          <XAxis dataKey="timestamp" hide />
+          <YAxis domain={[0, 100]} tick={{ fill: '#888', fontSize: 10 }} tickLine={false} axisLine={false} />
+          <Tooltip content={<ChartTooltip unit="°C" />} />
+          <Area type="monotone" dataKey="gpu" name="GPU" stroke={CHART_COLORS.temperature} fill="url(#gradGpu)" strokeWidth={2} dot={false} />
+          <Area type="monotone" dataKey="cpu" name="CPU" stroke={CHART_COLORS.temperatureCpu} fill="url(#gradCpu)" strokeWidth={2} dot={false} strokeDasharray="4 2" />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// Power Chart Component
+function PowerChart({ data, height = 140 }) {
+  if (!data || data.length < 2) {
+    return (
+      <div className="chart-container" style={{ height }}>
+        <div className="chart-empty">Collecting data...</div>
+      </div>
+    );
+  }
+
+  const maxPower = Math.max(...data.map(d => d.watts || 0), 50);
+
+  return (
+    <div className="chart-container" style={{ height }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={data} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
+          <defs>
+            <linearGradient id="gradPower" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor={CHART_COLORS.power} stopOpacity={0.3} />
+              <stop offset="95%" stopColor={CHART_COLORS.power} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" />
+          <XAxis dataKey="timestamp" hide />
+          <YAxis domain={[0, Math.ceil(maxPower / 10) * 10]} tick={{ fill: '#888', fontSize: 10 }} tickLine={false} axisLine={false} />
+          <Tooltip content={<ChartTooltip unit="W" />} />
+          <Area type="monotone" dataKey="watts" name="Power" stroke={CHART_COLORS.power} fill="url(#gradPower)" strokeWidth={2} dot={false} />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// Memory Chart Component
+function MemoryChart({ data, primaryKey = 'vram', height = 140 }) {
+  if (!data || data.length < 2) {
+    return (
+      <div className="chart-container" style={{ height }}>
+        <div className="chart-empty">Collecting data...</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="chart-container" style={{ height }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={data} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
+          <defs>
+            <linearGradient id="gradMem" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor={CHART_COLORS.memory} stopOpacity={0.3} />
+              <stop offset="95%" stopColor={CHART_COLORS.memory} stopOpacity={0} />
+            </linearGradient>
+            <linearGradient id="gradSys" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor={CHART_COLORS.memorySecondary} stopOpacity={0.2} />
+              <stop offset="95%" stopColor={CHART_COLORS.memorySecondary} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" />
+          <XAxis dataKey="timestamp" hide />
+          <YAxis domain={[0, 100]} tick={{ fill: '#888', fontSize: 10 }} tickLine={false} axisLine={false} />
+          <Tooltip content={<ChartTooltip unit="%" />} />
+          <Area type="monotone" dataKey={primaryKey} name={primaryKey.toUpperCase()} stroke={CHART_COLORS.memory} fill="url(#gradMem)" strokeWidth={2} dot={false} />
+          <Area type="monotone" dataKey="system" name="System" stroke={CHART_COLORS.memorySecondary} fill="url(#gradSys)" strokeWidth={2} dot={false} strokeDasharray="4 2" />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// Tokens/sec Chart Component
+function TokensChart({ data, height = 140 }) {
+  if (!data || data.length < 2) {
+    return (
+      <div className="chart-container" style={{ height }}>
+        <div className="chart-empty">Collecting data...</div>
+      </div>
+    );
+  }
+
+  const maxTokens = Math.max(...data.map(d => d.tokensPerSecond || 0), 10);
+
+  return (
+    <div className="chart-container" style={{ height }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={data} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
+          <defs>
+            <linearGradient id="gradTokens" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor={CHART_COLORS.tokens} stopOpacity={0.3} />
+              <stop offset="95%" stopColor={CHART_COLORS.tokens} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" />
+          <XAxis dataKey="timestamp" hide />
+          <YAxis domain={[0, Math.ceil(maxTokens / 5) * 5]} tick={{ fill: '#888', fontSize: 10 }} tickLine={false} axisLine={false} />
+          <Tooltip content={<ChartTooltip unit=" tok/s" />} />
+          <Area type="monotone" dataKey="tokensPerSecond" name="Speed" stroke={CHART_COLORS.tokens} fill="url(#gradTokens)" strokeWidth={2} dot={false} />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 // Dashboard Page
 function Dashboard({ stats }) {
   const [serverModels, setServerModels] = useState([]);
   const [loading, setLoading] = useState({});
+  const [analytics, setAnalytics] = useState(null);
 
   const fetchModels = useCallback(async () => {
     try {
@@ -225,11 +407,26 @@ function Dashboard({ stats }) {
     }
   }, []);
 
+  const fetchAnalytics = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/analytics?minutes=5`);
+      const data = await res.json();
+      setAnalytics(data);
+    } catch (err) {
+      console.error('Failed to fetch analytics:', err);
+    }
+  }, []);
+
   useEffect(() => {
     fetchModels();
-    const interval = setInterval(fetchModels, 10000);
-    return () => clearInterval(interval);
-  }, [fetchModels]);
+    fetchAnalytics();
+    const modelsInterval = setInterval(fetchModels, 10000);
+    const analyticsInterval = setInterval(fetchAnalytics, 2000);
+    return () => {
+      clearInterval(modelsInterval);
+      clearInterval(analyticsInterval);
+    };
+  }, [fetchModels, fetchAnalytics]);
 
   const startServer = async () => {
     setLoading(l => ({ ...l, server: true }));
@@ -392,8 +589,10 @@ function Dashboard({ stats }) {
           {stats?.gpu?.power > 0 && (
             <div className="resource-card">
               <div className="power-display">
-                <span className="power-value">{stats.gpu.power.toFixed(0)}</span>
-                <span className="power-unit">W</span>
+                <div className="power-inner">
+                  <span className="power-value">{stats.gpu.power.toFixed(0)}</span>
+                  <span className="power-unit">W</span>
+                </div>
               </div>
               <div className="resource-info">
                 <span className="resource-label">Power</span>
@@ -428,21 +627,6 @@ function Dashboard({ stats }) {
         </div>
       </section>
 
-      {/* Active Models */}
-      {serverModels.length > 0 && (
-        <section className="dashboard-section">
-          <h3>Active Models</h3>
-          <div className="models-list">
-            {serverModels.map((model) => (
-              <div key={model.id} className="model-list-item">
-                <span className="model-name">{model.id}</span>
-                <span className="model-status loaded">Loaded</span>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
       {/* Downloads */}
       {stats?.downloads && Object.keys(stats.downloads).length > 0 && (
         <section className="dashboard-section">
@@ -469,6 +653,95 @@ function Dashboard({ stats }) {
           </div>
         </section>
       )}
+
+      {/* Analytics Charts */}
+      <section className="dashboard-section analytics-section">
+        <h3>Performance Analytics (5 min)</h3>
+        <div className="charts-grid">
+          {/* Temperature Chart */}
+          <div className="chart-card">
+            <h4>
+              Temperature
+              <span className="chart-value">
+                GPU: {stats?.gpu?.temperature?.toFixed(0) || 0}°C
+                {stats?.cpu?.temperature && ` / CPU: ${stats.cpu.temperature}°C`}
+              </span>
+            </h4>
+            <TemperatureChart data={analytics?.temperature || []} />
+            <div className="chart-legend">
+              <div className="chart-legend-item">
+                <span className="chart-legend-dot gpu"></span>
+                GPU
+              </div>
+              <div className="chart-legend-item">
+                <span className="chart-legend-dot cpu"></span>
+                CPU
+              </div>
+            </div>
+          </div>
+
+          {/* Power Chart */}
+          <div className="chart-card">
+            <h4>
+              Power Consumption
+              <span className="chart-value">{stats?.gpu?.power?.toFixed(0) || 0} W</span>
+            </h4>
+            <PowerChart data={analytics?.power || []} />
+          </div>
+
+          {/* Memory Chart */}
+          <div className="chart-card">
+            <h4>
+              Memory Usage
+              <span className="chart-value">
+                {stats?.gpu?.isAPU
+                  ? `GTT: ${stats?.gpu?.gtt?.usage?.toFixed(0) || 0}%`
+                  : `VRAM: ${stats?.gpu?.vram?.usage?.toFixed(0) || 0}%`
+                }
+              </span>
+            </h4>
+            <MemoryChart
+              data={analytics?.memory || []}
+              primaryKey={stats?.gpu?.isAPU ? 'gtt' : 'vram'}
+            />
+            <div className="chart-legend">
+              <div className="chart-legend-item">
+                <span className="chart-legend-dot vram"></span>
+                {stats?.gpu?.isAPU ? 'GTT' : 'VRAM'}
+              </div>
+              <div className="chart-legend-item">
+                <span className="chart-legend-dot system"></span>
+                System
+              </div>
+            </div>
+          </div>
+
+          {/* Tokens/sec Chart */}
+          <div className="chart-card">
+            <h4>
+              Generation Speed
+              <span className="chart-value">
+                {analytics?.tokenStats?.averageTokensPerSecond?.toFixed(1) || 0} tok/s avg
+              </span>
+            </h4>
+            <TokensChart data={analytics?.tokens || []} />
+            <div className="token-stats-grid">
+              <div className="token-stat-card">
+                <div className="token-stat-value">{analytics?.tokenStats?.totalRequests || 0}</div>
+                <div className="token-stat-label">Requests</div>
+              </div>
+              <div className="token-stat-card">
+                <div className="token-stat-value">{((analytics?.tokenStats?.totalPromptTokens || 0) / 1000).toFixed(1)}k</div>
+                <div className="token-stat-label">Prompt Tokens</div>
+              </div>
+              <div className="token-stat-card">
+                <div className="token-stat-value">{((analytics?.tokenStats?.totalCompletionTokens || 0) / 1000).toFixed(1)}k</div>
+                <div className="token-stat-label">Completion Tokens</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
@@ -766,12 +1039,15 @@ function DownloadPage({ stats }) {
   const [selectedRepo, setSelectedRepo] = useState(null);
   const [repoQuantizations, setRepoQuantizations] = useState([]);
   const [loadingFiles, setLoadingFiles] = useState(false);
+  const [repoError, setRepoError] = useState(null);
+  const [customPattern, setCustomPattern] = useState('');
 
   const searchModels = async () => {
     if (!searchQuery.trim()) return;
     setSearching(true);
     setSelectedRepo(null);
     setRepoQuantizations([]);
+    setRepoError(null);
     try {
       const res = await fetch(`${API_BASE}/search?query=${encodeURIComponent(searchQuery)}`);
       const data = await res.json();
@@ -785,14 +1061,20 @@ function DownloadPage({ stats }) {
   const selectRepo = async (repo) => {
     setSelectedRepo(repo);
     setLoadingFiles(true);
+    setRepoError(null);
+    setRepoQuantizations([]);
     try {
       const [author, model] = repo.id.split('/');
       const res = await fetch(`${API_BASE}/repo/${author}/${model}/files`);
       const data = await res.json();
-      setRepoQuantizations(data.quantizations || []);
+      if (data.error) {
+        setRepoError(data.error);
+      } else {
+        setRepoQuantizations(data.quantizations || []);
+      }
     } catch (err) {
       console.error('Failed to fetch repo files:', err);
-      setRepoQuantizations([]);
+      setRepoError(err.message);
     }
     setLoadingFiles(false);
   };
@@ -804,6 +1086,32 @@ function DownloadPage({ stats }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repo, quantization })
       });
+    } catch (err) {
+      console.error('Failed to start download:', err);
+    }
+  };
+
+  const downloadAllGguf = async (repo) => {
+    try {
+      await fetch(`${API_BASE}/pull`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo })
+      });
+    } catch (err) {
+      console.error('Failed to start download:', err);
+    }
+  };
+
+  const downloadWithPattern = async (repo, pattern) => {
+    if (!pattern.trim()) return;
+    try {
+      await fetch(`${API_BASE}/pull`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo, pattern: pattern.trim() })
+      });
+      setCustomPattern('');
     } catch (err) {
       console.error('Failed to start download:', err);
     }
@@ -883,12 +1191,87 @@ function DownloadPage({ stats }) {
               ← Back
             </button>
             <h3>{selectedRepo.id}</h3>
+            <a
+              href={`https://huggingface.co/${selectedRepo.id}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="repo-link"
+            >
+              View on HuggingFace ↗
+            </a>
           </div>
 
           {loadingFiles ? (
-            <p>Loading available quantizations...</p>
+            <div className="loading-state">
+              <div className="loading-spinner"></div>
+              <p>Scanning repository for GGUF files...</p>
+            </div>
+          ) : repoError ? (
+            <div className="error-state">
+              <p>Error loading repository: {repoError}</p>
+              <div className="fallback-options">
+                <p>You can still try to download using a custom pattern:</p>
+                <div className="custom-download-row">
+                  <input
+                    type="text"
+                    value={customPattern}
+                    onChange={(e) => setCustomPattern(e.target.value)}
+                    placeholder="e.g., *.gguf or *Q4_K_M*.gguf"
+                  />
+                  <button
+                    className="btn-primary"
+                    onClick={() => downloadWithPattern(selectedRepo.id, customPattern)}
+                    disabled={!customPattern.trim()}
+                  >
+                    Download
+                  </button>
+                </div>
+              </div>
+            </div>
           ) : repoQuantizations.length === 0 ? (
-            <p>No GGUF files found in this repository</p>
+            <div className="no-quants-state">
+              <p>No recognized quantizations found in this repository.</p>
+              <p className="hint">The repository may use different naming conventions or store files in subdirectories.</p>
+
+              <div className="fallback-options">
+                <h4>Download Options</h4>
+
+                <div className="option-card">
+                  <div className="option-info">
+                    <span className="option-title">Download all GGUF files</span>
+                    <span className="option-desc">Downloads any file ending in .gguf</span>
+                  </div>
+                  <button
+                    className="btn-primary"
+                    onClick={() => downloadAllGguf(selectedRepo.id)}
+                  >
+                    Download All
+                  </button>
+                </div>
+
+                <div className="option-card">
+                  <div className="option-info">
+                    <span className="option-title">Custom pattern</span>
+                    <span className="option-desc">Specify a glob pattern (e.g., *Q5_K_M*.gguf)</span>
+                  </div>
+                  <div className="custom-download-row">
+                    <input
+                      type="text"
+                      value={customPattern}
+                      onChange={(e) => setCustomPattern(e.target.value)}
+                      placeholder="*Q4_K_M*.gguf"
+                    />
+                    <button
+                      className="btn-primary"
+                      onClick={() => downloadWithPattern(selectedRepo.id, customPattern)}
+                      disabled={!customPattern.trim()}
+                    >
+                      Download
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
           ) : (
             <div className="quant-list">
               {repoQuantizations.map((quant) => (
@@ -908,6 +1291,27 @@ function DownloadPage({ stats }) {
                   </button>
                 </div>
               ))}
+
+              {/* Also offer custom pattern option */}
+              <div className="quant-item custom-pattern">
+                <div className="quant-info">
+                  <span className="quant-badge secondary">Custom</span>
+                  <input
+                    type="text"
+                    value={customPattern}
+                    onChange={(e) => setCustomPattern(e.target.value)}
+                    placeholder="Custom pattern (e.g., *IQ4*.gguf)"
+                    className="inline-input"
+                  />
+                </div>
+                <button
+                  className="btn-secondary"
+                  onClick={() => downloadWithPattern(selectedRepo.id, customPattern)}
+                  disabled={!customPattern.trim()}
+                >
+                  Download
+                </button>
+              </div>
             </div>
           )}
         </section>
@@ -920,10 +1324,13 @@ function DownloadPage({ stats }) {
 function LogsPage({ logs, clearLogs }) {
   const [filter, setFilter] = useState('');
   const [autoScroll, setAutoScroll] = useState(true);
+  const [showFiltersPanel, setShowFiltersPanel] = useState(false);
+  const [logFilters, setLogFilters] = useState({ defaultFilters: [], customFilters: [] });
+  const [newFilterPattern, setNewFilterPattern] = useState('');
   const logsEndRef = useRef(null);
   const logsContainerRef = useRef(null);
 
-  // Fetch initial logs on mount
+  // Fetch initial logs and filters on mount
   useEffect(() => {
     const fetchInitialLogs = async () => {
       try {
@@ -936,7 +1343,59 @@ function LogsPage({ logs, clearLogs }) {
       }
     };
     fetchInitialLogs();
+    fetchFilters();
   }, []);
+
+  const fetchFilters = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/logs/filters`);
+      const data = await res.json();
+      setLogFilters(data);
+    } catch (err) {
+      console.error('Failed to fetch log filters:', err);
+    }
+  };
+
+  const addFilter = async (pattern) => {
+    try {
+      const res = await fetch(`${API_BASE}/logs/filters`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pattern })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setLogFilters(prev => ({ ...prev, customFilters: data.filters }));
+        setNewFilterPattern('');
+      }
+    } catch (err) {
+      console.error('Failed to add filter:', err);
+    }
+  };
+
+  const removeFilter = async (pattern) => {
+    try {
+      const res = await fetch(`${API_BASE}/logs/filters`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pattern })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setLogFilters(prev => ({ ...prev, customFilters: data.filters }));
+      }
+    } catch (err) {
+      console.error('Failed to remove filter:', err);
+    }
+  };
+
+  const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  const addFilterFromLog = (message) => {
+    // Escape special regex chars and create a pattern
+    const pattern = escapeRegex(message);
+    addFilter(pattern);
+  };
 
   useEffect(() => {
     if (autoScroll && logsEndRef.current) {
@@ -978,6 +1437,13 @@ function LogsPage({ logs, clearLogs }) {
           <button className="btn-secondary" onClick={clearLogs}>
             Clear
           </button>
+          <button
+            className={`btn-secondary ${showFiltersPanel ? 'active' : ''}`}
+            onClick={() => setShowFiltersPanel(!showFiltersPanel)}
+            title="Manage server-side log filters"
+          >
+            Filters ({logFilters.customFilters.length})
+          </button>
           <label className="auto-scroll-toggle">
             <input
               type="checkbox"
@@ -988,6 +1454,59 @@ function LogsPage({ logs, clearLogs }) {
           </label>
         </div>
       </div>
+
+      {showFiltersPanel && (
+        <div className="filters-panel">
+          <div className="filters-section">
+            <h4>Server-side Log Filters</h4>
+            <p className="hint">Matching log lines are ignored at the server and won't appear in logs.</p>
+
+            <div className="filter-input-row">
+              <input
+                type="text"
+                placeholder="Add regex pattern (e.g., GET /api.*200)"
+                value={newFilterPattern}
+                onChange={(e) => setNewFilterPattern(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && newFilterPattern && addFilter(newFilterPattern)}
+              />
+              <button
+                className="btn-primary"
+                onClick={() => addFilter(newFilterPattern)}
+                disabled={!newFilterPattern}
+              >
+                Add
+              </button>
+            </div>
+
+            {logFilters.defaultFilters.length > 0 && (
+              <div className="filter-group">
+                <h5>Default Filters (built-in)</h5>
+                {logFilters.defaultFilters.map((f, i) => (
+                  <div key={i} className="filter-item default">
+                    <code>{f}</code>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {logFilters.customFilters.length > 0 && (
+              <div className="filter-group">
+                <h5>Custom Filters</h5>
+                {logFilters.customFilters.map((f, i) => (
+                  <div key={i} className="filter-item custom">
+                    <code>{f}</code>
+                    <button className="btn-remove" onClick={() => removeFilter(f)} title="Remove filter">×</button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {logFilters.customFilters.length === 0 && (
+              <p className="no-filters">No custom filters. Click the mute icon on a log entry to filter similar messages.</p>
+            )}
+          </div>
+        </div>
+      )}
 
       <div
         className="logs-container"
@@ -1007,6 +1526,13 @@ function LogsPage({ logs, clearLogs }) {
                 <span className={`log-source ${log.source}`}>{log.source}</span>
                 <span className="log-message">{log.message}</span>
                 {log.count > 1 && <span className="log-count">×{log.count}</span>}
+                <button
+                  className="btn-mute"
+                  onClick={() => addFilterFromLog(log.message)}
+                  title="Filter this log pattern"
+                >
+                  🔇
+                </button>
               </div>
             ))}
             <div ref={logsEndRef} />
@@ -1431,6 +1957,490 @@ function SettingsPage() {
   );
 }
 
+// API Documentation Page
+function ApiDocsPage() {
+  const [activeEndpoint, setActiveEndpoint] = useState(null);
+  const [params, setParams] = useState({});
+  const [response, setResponse] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState('manager');
+
+  const managerEndpoints = [
+    {
+      id: 'get-status',
+      method: 'GET',
+      path: '/api/status',
+      description: 'Get server status including llama health, mode, and downloads',
+      params: [],
+      example: null
+    },
+    {
+      id: 'get-models',
+      method: 'GET',
+      path: '/api/models',
+      description: 'List all local and server-loaded models',
+      params: [],
+      example: null
+    },
+    {
+      id: 'load-model',
+      method: 'POST',
+      path: '/api/models/load',
+      description: 'Load a model into the llama server',
+      params: [
+        { name: 'model', type: 'string', required: true, description: 'Model name or path to load' }
+      ],
+      example: { model: 'Qwen_Qwen2.5-Coder-32B-Instruct-GGUF/qwen2.5-coder-32b-instruct-q5_k_m.gguf' }
+    },
+    {
+      id: 'unload-model',
+      method: 'POST',
+      path: '/api/models/unload',
+      description: 'Unload a model from the llama server',
+      params: [
+        { name: 'model', type: 'string', required: true, description: 'Model ID to unload' }
+      ],
+      example: { model: 'model-id' }
+    },
+    {
+      id: 'get-settings',
+      method: 'GET',
+      path: '/api/settings',
+      description: 'Get current server settings',
+      params: [],
+      example: null
+    },
+    {
+      id: 'update-settings',
+      method: 'POST',
+      path: '/api/settings',
+      description: 'Update server settings',
+      params: [
+        { name: 'contextSize', type: 'number', required: false, description: 'Context window size (512-262144)' },
+        { name: 'modelsMax', type: 'number', required: false, description: 'Max loaded models (1-10)' },
+        { name: 'gpuLayers', type: 'number', required: false, description: 'GPU layers (0-999)' },
+        { name: 'autoStart', type: 'boolean', required: false, description: 'Auto-start server on manager start' },
+        { name: 'noWarmup', type: 'boolean', required: false, description: 'Skip model warmup' },
+        { name: 'flashAttn', type: 'boolean', required: false, description: 'Enable flash attention' }
+      ],
+      example: { contextSize: 8192, modelsMax: 2 }
+    },
+    {
+      id: 'start-server',
+      method: 'POST',
+      path: '/api/server/start',
+      description: 'Start the llama server in router mode',
+      params: [],
+      example: null
+    },
+    {
+      id: 'stop-server',
+      method: 'POST',
+      path: '/api/server/stop',
+      description: 'Stop the llama server',
+      params: [],
+      example: null
+    },
+    {
+      id: 'get-presets',
+      method: 'GET',
+      path: '/api/presets',
+      description: 'List available optimized presets',
+      params: [],
+      example: null
+    },
+    {
+      id: 'activate-preset',
+      method: 'POST',
+      path: '/api/presets/:presetId/activate',
+      description: 'Activate an optimized preset (single-model mode)',
+      params: [
+        { name: 'presetId', type: 'path', required: true, description: 'Preset ID (e.g., gpt120, qwen3, qwen2.5)' }
+      ],
+      example: null
+    },
+    {
+      id: 'get-analytics',
+      method: 'GET',
+      path: '/api/analytics',
+      description: 'Get time-series analytics data',
+      params: [
+        { name: 'minutes', type: 'query', required: false, description: 'Minutes of data to retrieve (default: 5)' }
+      ],
+      example: null
+    },
+    {
+      id: 'get-processes',
+      method: 'GET',
+      path: '/api/processes',
+      description: 'List running llama-server processes',
+      params: [],
+      example: null
+    },
+    {
+      id: 'kill-process',
+      method: 'POST',
+      path: '/api/processes/:pid/kill',
+      description: 'Kill a specific process by PID',
+      params: [
+        { name: 'pid', type: 'path', required: true, description: 'Process ID to kill' }
+      ],
+      example: null
+    },
+    {
+      id: 'search-models',
+      method: 'GET',
+      path: '/api/search',
+      description: 'Search HuggingFace for GGUF models',
+      params: [
+        { name: 'query', type: 'query', required: true, description: 'Search query' }
+      ],
+      example: null
+    },
+    {
+      id: 'pull-model',
+      method: 'POST',
+      path: '/api/pull',
+      description: 'Download a model from HuggingFace',
+      params: [
+        { name: 'repo', type: 'string', required: true, description: 'HuggingFace repo (e.g., Qwen/Qwen2.5-Coder-32B-Instruct-GGUF)' },
+        { name: 'quantization', type: 'string', required: true, description: 'Quantization to download (e.g., Q5_K_M)' }
+      ],
+      example: { repo: 'Qwen/Qwen2.5-Coder-32B-Instruct-GGUF', quantization: 'Q5_K_M' }
+    },
+    {
+      id: 'get-logs',
+      method: 'GET',
+      path: '/api/logs',
+      description: 'Get server logs',
+      params: [
+        { name: 'limit', type: 'query', required: false, description: 'Max logs to return (default: 100)' }
+      ],
+      example: null
+    }
+  ];
+
+  const openaiEndpoints = [
+    {
+      id: 'openai-models',
+      method: 'GET',
+      path: '/api/v1/models',
+      description: 'List available models (OpenAI-compatible)',
+      params: [],
+      example: null
+    },
+    {
+      id: 'openai-chat',
+      method: 'POST',
+      path: '/api/v1/chat/completions',
+      description: 'Create a chat completion (OpenAI-compatible). Supports streaming.',
+      params: [
+        { name: 'model', type: 'string', required: true, description: 'Model ID to use' },
+        { name: 'messages', type: 'json', required: true, description: 'Array of message objects with role and content' },
+        { name: 'temperature', type: 'number', required: false, description: 'Sampling temperature (0-2)' },
+        { name: 'max_tokens', type: 'number', required: false, description: 'Maximum tokens to generate' },
+        { name: 'stream', type: 'boolean', required: false, description: 'Stream the response' },
+        { name: 'top_p', type: 'number', required: false, description: 'Nucleus sampling parameter' },
+        { name: 'frequency_penalty', type: 'number', required: false, description: 'Frequency penalty (-2 to 2)' },
+        { name: 'presence_penalty', type: 'number', required: false, description: 'Presence penalty (-2 to 2)' }
+      ],
+      example: {
+        model: 'model-id',
+        messages: [
+          { role: 'system', content: 'You are a helpful assistant.' },
+          { role: 'user', content: 'Hello!' }
+        ],
+        temperature: 0.7,
+        max_tokens: 500
+      }
+    },
+    {
+      id: 'openai-completions',
+      method: 'POST',
+      path: '/api/v1/completions',
+      description: 'Create a text completion (legacy OpenAI-compatible endpoint)',
+      params: [
+        { name: 'model', type: 'string', required: true, description: 'Model ID to use' },
+        { name: 'prompt', type: 'string', required: true, description: 'The prompt to complete' },
+        { name: 'max_tokens', type: 'number', required: false, description: 'Maximum tokens to generate' },
+        { name: 'temperature', type: 'number', required: false, description: 'Sampling temperature' },
+        { name: 'stream', type: 'boolean', required: false, description: 'Stream the response' }
+      ],
+      example: {
+        model: 'model-id',
+        prompt: 'Once upon a time',
+        max_tokens: 100,
+        temperature: 0.7
+      }
+    },
+    {
+      id: 'openai-embeddings',
+      method: 'POST',
+      path: '/api/v1/embeddings',
+      description: 'Create embeddings for text (OpenAI-compatible)',
+      params: [
+        { name: 'model', type: 'string', required: true, description: 'Model ID to use' },
+        { name: 'input', type: 'string', required: true, description: 'Text to embed (string or array of strings)' }
+      ],
+      example: {
+        model: 'model-id',
+        input: 'Hello world'
+      }
+    }
+  ];
+
+  const endpoints = activeTab === 'manager' ? managerEndpoints : openaiEndpoints;
+
+  const handleParamChange = (name, value, type) => {
+    let parsedValue = value;
+    if (type === 'number' && value !== '') {
+      parsedValue = parseFloat(value);
+    } else if (type === 'boolean') {
+      parsedValue = value === 'true';
+    } else if (type === 'json') {
+      try {
+        parsedValue = JSON.parse(value);
+      } catch {
+        parsedValue = value;
+      }
+    }
+    setParams(p => ({ ...p, [name]: parsedValue }));
+  };
+
+  const testEndpoint = async (endpoint) => {
+    setLoading(true);
+    setResponse(null);
+
+    try {
+      let url = endpoint.path;
+      const queryParams = [];
+      const bodyParams = {};
+
+      // Process parameters
+      for (const param of endpoint.params) {
+        const value = params[param.name];
+        if (value === undefined || value === '') continue;
+
+        if (param.type === 'path') {
+          url = url.replace(`:${param.name}`, encodeURIComponent(value));
+        } else if (param.type === 'query') {
+          queryParams.push(`${param.name}=${encodeURIComponent(value)}`);
+        } else {
+          bodyParams[param.name] = value;
+        }
+      }
+
+      if (queryParams.length > 0) {
+        url += '?' + queryParams.join('&');
+      }
+
+      const options = {
+        method: endpoint.method,
+        headers: { 'Content-Type': 'application/json' }
+      };
+
+      if (endpoint.method !== 'GET' && Object.keys(bodyParams).length > 0) {
+        options.body = JSON.stringify(bodyParams);
+      }
+
+      const startTime = Date.now();
+      const res = await fetch(url, options);
+      const duration = Date.now() - startTime;
+
+      let data;
+      const contentType = res.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        data = await res.json();
+      } else {
+        data = await res.text();
+      }
+
+      setResponse({
+        status: res.status,
+        statusText: res.statusText,
+        duration,
+        data
+      });
+    } catch (err) {
+      setResponse({
+        status: 'Error',
+        statusText: err.message,
+        duration: 0,
+        data: null
+      });
+    }
+
+    setLoading(false);
+  };
+
+  const selectEndpoint = (endpoint) => {
+    setActiveEndpoint(endpoint);
+    setResponse(null);
+    // Pre-fill with example if available
+    if (endpoint.example) {
+      const newParams = {};
+      for (const [key, value] of Object.entries(endpoint.example)) {
+        newParams[key] = typeof value === 'object' ? JSON.stringify(value, null, 2) : value;
+      }
+      setParams(newParams);
+    } else {
+      setParams({});
+    }
+  };
+
+  return (
+    <div className="page api-docs-page">
+      <div className="page-header">
+        <h2>API Documentation</h2>
+      </div>
+
+      <p className="page-description">
+        Interactive API documentation for Llama Manager. Test endpoints directly from this page.
+      </p>
+
+      <div className="api-tabs">
+        <button
+          className={`api-tab ${activeTab === 'manager' ? 'active' : ''}`}
+          onClick={() => { setActiveTab('manager'); setActiveEndpoint(null); setResponse(null); }}
+        >
+          Manager API
+        </button>
+        <button
+          className={`api-tab ${activeTab === 'openai' ? 'active' : ''}`}
+          onClick={() => { setActiveTab('openai'); setActiveEndpoint(null); setResponse(null); }}
+        >
+          OpenAI API (v1)
+        </button>
+      </div>
+
+      <div className="api-docs-layout">
+        {/* Endpoints List */}
+        <div className="api-endpoints-list">
+          <h3>{activeTab === 'manager' ? 'Manager Endpoints' : 'OpenAI-Compatible Endpoints'}</h3>
+          {activeTab === 'openai' && (
+            <p className="api-base-url">Base URL: <code>/api/v1</code></p>
+          )}
+          <div className="endpoints-list">
+            {endpoints.map(endpoint => (
+              <div
+                key={endpoint.id}
+                className={`endpoint-item ${activeEndpoint?.id === endpoint.id ? 'active' : ''}`}
+                onClick={() => selectEndpoint(endpoint)}
+              >
+                <span className={`method-badge ${endpoint.method.toLowerCase()}`}>
+                  {endpoint.method}
+                </span>
+                <span className="endpoint-path">{endpoint.path}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Endpoint Details & Testing */}
+        <div className="api-endpoint-detail">
+          {activeEndpoint ? (
+            <>
+              <div className="endpoint-header">
+                <span className={`method-badge large ${activeEndpoint.method.toLowerCase()}`}>
+                  {activeEndpoint.method}
+                </span>
+                <code className="endpoint-path-large">{activeEndpoint.path}</code>
+              </div>
+
+              <p className="endpoint-description">{activeEndpoint.description}</p>
+
+              {/* Parameters Form */}
+              {activeEndpoint.params.length > 0 && (
+                <div className="params-section">
+                  <h4>Parameters</h4>
+                  <div className="params-form">
+                    {activeEndpoint.params.map(param => (
+                      <div key={param.name} className="param-field">
+                        <label>
+                          <span className="param-name">{param.name}</span>
+                          {param.required && <span className="param-required">*</span>}
+                          <span className="param-type">{param.type}</span>
+                        </label>
+                        <p className="param-description">{param.description}</p>
+                        {param.type === 'boolean' ? (
+                          <select
+                            value={params[param.name] ?? ''}
+                            onChange={(e) => handleParamChange(param.name, e.target.value, 'boolean')}
+                          >
+                            <option value="">-- Select --</option>
+                            <option value="true">true</option>
+                            <option value="false">false</option>
+                          </select>
+                        ) : param.type === 'json' ? (
+                          <textarea
+                            value={params[param.name] ?? ''}
+                            onChange={(e) => handleParamChange(param.name, e.target.value, 'json')}
+                            placeholder={`Enter JSON...`}
+                            rows={4}
+                          />
+                        ) : (
+                          <input
+                            type={param.type === 'number' ? 'number' : 'text'}
+                            value={params[param.name] ?? ''}
+                            onChange={(e) => handleParamChange(param.name, e.target.value, param.type)}
+                            placeholder={param.type === 'path' ? `Enter ${param.name}...` : `Enter value...`}
+                          />
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Test Button */}
+              <div className="test-section">
+                <button
+                  className="btn-primary"
+                  onClick={() => testEndpoint(activeEndpoint)}
+                  disabled={loading}
+                >
+                  {loading ? 'Sending...' : 'Send Request'}
+                </button>
+              </div>
+
+              {/* Response */}
+              {response && (
+                <div className="response-section">
+                  <h4>Response</h4>
+                  <div className={`response-status ${response.status >= 200 && response.status < 300 ? 'success' : 'error'}`}>
+                    <span className="status-code">{response.status}</span>
+                    <span className="status-text">{response.statusText}</span>
+                    <span className="response-time">{response.duration}ms</span>
+                  </div>
+                  <pre className="response-body">
+                    {typeof response.data === 'object'
+                      ? JSON.stringify(response.data, null, 2)
+                      : response.data || 'No response body'}
+                  </pre>
+                </div>
+              )}
+
+              {/* Example */}
+              {activeEndpoint.example && (
+                <div className="example-section">
+                  <h4>Example Request Body</h4>
+                  <pre className="example-code">
+                    {JSON.stringify(activeEndpoint.example, null, 2)}
+                  </pre>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="no-endpoint-selected">
+              <p>Select an endpoint from the list to view details and test it.</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Query Panel Component
 function QueryPanel({ stats }) {
   const [isOpen, setIsOpen] = useState(false);
@@ -1439,11 +2449,23 @@ function QueryPanel({ stats }) {
     return localStorage.getItem('lastSelectedModel') || '';
   });
   const [prompt, setPrompt] = useState('');
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages] = useState([]); // Each message: { role, content, stats? }
   const [isLoading, setIsLoading] = useState(false);
   const [streamingMessage, setStreamingMessage] = useState('');
+  const [hoveredMessage, setHoveredMessage] = useState(null);
+  const [copiedId, setCopiedId] = useState(null);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
+
+  const copyToClipboard = async (text, messageId) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(messageId);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
 
   // Compute base URL for llama.cpp API
   const llamaBaseUrl = stats?.llamaUiUrl || `http://${window.location.hostname}:${stats?.llamaPort || 5251}`;
@@ -1489,19 +2511,24 @@ function QueryPanel({ stats }) {
     e.preventDefault();
     if (!prompt.trim() || isLoading) return;
 
-    const userMessage = { role: 'user', content: prompt.trim() };
+    const messageId = Date.now();
+    const userMessage = { id: messageId, role: 'user', content: prompt.trim() };
     setMessages(prev => [...prev, userMessage]);
     setPrompt('');
     setIsLoading(true);
     setStreamingMessage('');
 
+    const startTime = Date.now();
+    let tokenCount = 0;
+
     try {
-      const response = await fetch(`${llamaBaseUrl}/v1/chat/completions`, {
+      // Use our API wrapper to get stats tracking
+      const response = await fetch(`${API_BASE}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: selectedModel,
-          messages: [...messages, userMessage],
+          messages: [...messages, userMessage].map(m => ({ role: m.role, content: m.content })),
           stream: true
         })
       });
@@ -1513,6 +2540,8 @@ function QueryPanel({ stats }) {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let fullContent = '';
+      let usage = null;
+      let modelUsed = selectedModel;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1529,8 +2558,18 @@ function QueryPanel({ stats }) {
             try {
               const parsed = JSON.parse(data);
               const content = parsed.choices?.[0]?.delta?.content || '';
-              fullContent += content;
-              setStreamingMessage(fullContent);
+              if (content) {
+                fullContent += content;
+                tokenCount++;
+                setStreamingMessage(fullContent);
+              }
+              // Capture usage stats if provided
+              if (parsed.usage) {
+                usage = parsed.usage;
+              }
+              if (parsed.model) {
+                modelUsed = parsed.model;
+              }
             } catch {
               // Skip invalid JSON
             }
@@ -1538,11 +2577,34 @@ function QueryPanel({ stats }) {
         }
       }
 
-      setMessages(prev => [...prev, { role: 'assistant', content: fullContent }]);
+      const duration = Date.now() - startTime;
+      const tokensPerSecond = duration > 0 ? (tokenCount / (duration / 1000)) : 0;
+
+      const messageStats = {
+        model: modelUsed,
+        promptTokens: usage?.prompt_tokens || 0,
+        completionTokens: usage?.completion_tokens || tokenCount,
+        totalTokens: (usage?.prompt_tokens || 0) + (usage?.completion_tokens || tokenCount),
+        tokensPerSecond: Math.round(tokensPerSecond * 10) / 10,
+        duration: Math.round(duration),
+        timestamp: new Date().toISOString()
+      };
+
+      setMessages(prev => [...prev, {
+        id: Date.now(),
+        role: 'assistant',
+        content: fullContent,
+        stats: messageStats
+      }]);
       setStreamingMessage('');
     } catch (err) {
       console.error('Query failed:', err);
-      setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${err.message}` }]);
+      setMessages(prev => [...prev, {
+        id: Date.now(),
+        role: 'assistant',
+        content: `Error: ${err.message}`,
+        stats: null
+      }]);
     }
 
     setIsLoading(false);
@@ -1558,6 +2620,7 @@ function QueryPanel({ stats }) {
   const clearChat = () => {
     setMessages([]);
     setStreamingMessage('');
+    setHoveredMessage(null);
   };
 
   const isHealthy = stats?.llama?.status === 'ok';
@@ -1604,15 +2667,62 @@ function QueryPanel({ stats }) {
               {!isHealthy && <p className="hint">Server is not running</p>}
             </div>
           )}
-          {messages.map((msg, i) => (
-            <div key={i} className={`query-message ${msg.role}`}>
-              <span className="message-role">{msg.role === 'user' ? 'You' : 'AI'}</span>
+          {messages.map((msg) => (
+            <div
+              key={msg.id}
+              className={`query-message ${msg.role}`}
+              onMouseEnter={() => msg.stats && setHoveredMessage(msg.id)}
+              onMouseLeave={() => setHoveredMessage(null)}
+            >
+              <div className="message-header">
+                <span className="message-role">{msg.role === 'user' ? 'You' : 'AI'}</span>
+                <div className="message-actions">
+                  <button
+                    className={`btn-icon ${copiedId === msg.id ? 'copied' : ''}`}
+                    onClick={() => copyToClipboard(msg.content, msg.id)}
+                    title="Copy to clipboard"
+                  >
+                    {copiedId === msg.id ? '✓' : '📋'}
+                  </button>
+                </div>
+              </div>
               <div className="message-content">{msg.content}</div>
+              {/* Stats tooltip on hover for assistant messages */}
+              {msg.role === 'assistant' && msg.stats && hoveredMessage === msg.id && (
+                <div className="message-stats-tooltip">
+                  <div className="stats-tooltip-row">
+                    <span className="stats-label">Model:</span>
+                    <span className="stats-value">{msg.stats.model}</span>
+                  </div>
+                  <div className="stats-tooltip-row">
+                    <span className="stats-label">Speed:</span>
+                    <span className="stats-value">{msg.stats.tokensPerSecond} tok/s</span>
+                  </div>
+                  <div className="stats-tooltip-row">
+                    <span className="stats-label">Completion:</span>
+                    <span className="stats-value">{msg.stats.completionTokens} tokens</span>
+                  </div>
+                  <div className="stats-tooltip-row">
+                    <span className="stats-label">Prompt:</span>
+                    <span className="stats-value">{msg.stats.promptTokens} tokens</span>
+                  </div>
+                  <div className="stats-tooltip-row">
+                    <span className="stats-label">Total:</span>
+                    <span className="stats-value">{msg.stats.totalTokens} tokens</span>
+                  </div>
+                  <div className="stats-tooltip-row">
+                    <span className="stats-label">Duration:</span>
+                    <span className="stats-value">{(msg.stats.duration / 1000).toFixed(2)}s</span>
+                  </div>
+                </div>
+              )}
             </div>
           ))}
           {streamingMessage && (
             <div className="query-message assistant streaming">
-              <span className="message-role">AI</span>
+              <div className="message-header">
+                <span className="message-role">AI</span>
+              </div>
               <div className="message-content">{streamingMessage}</div>
             </div>
           )}
@@ -1664,6 +2774,7 @@ function App() {
             <Route path="/logs" element={<LogsPage logs={logs} clearLogs={clearLogs} />} />
             <Route path="/processes" element={<ProcessesPage />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/api-docs" element={<ApiDocsPage />} />
           </Routes>
         </main>
         <QueryPanel stats={stats} />
