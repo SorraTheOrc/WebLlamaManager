@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { spawn, exec, execSync } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, renameSync, rmdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join, basename } from 'path';
 import { createServer } from 'http';
@@ -753,6 +753,8 @@ function scanLocalModels() {
     splitModel.parts.sort((a, b) => a.partNum - b.partNum);
     if (splitModel.parts.length > 0) {
       splitModel.path = splitModel.parts[0].path;
+      // Get the first part's filename relative to MODELS_DIR for llama.cpp router mode
+      splitModel.firstPartName = splitModel.parts[0].path.replace(MODELS_DIR + '/', '');
     }
 
     // Only include if we have all parts
@@ -763,7 +765,8 @@ function scanLocalModels() {
         size: splitModel.size,
         modified: splitModel.modified,
         isSplit: true,
-        partCount: splitModel.totalParts
+        partCount: splitModel.totalParts,
+        firstPartName: splitModel.firstPartName // For llama.cpp to load correctly
       });
     } else {
       // Incomplete split model - still show it but mark as incomplete
@@ -775,7 +778,8 @@ function scanLocalModels() {
         isSplit: true,
         partCount: splitModel.totalParts,
         partsFound: splitModel.parts.length,
-        incomplete: true
+        incomplete: true,
+        firstPartName: splitModel.firstPartName
       });
     }
   }
@@ -971,7 +975,9 @@ app.get('/api/models', async (req, res) => {
   }
 });
 
-// Load a model in llama-server
+// Load a model in llama-server (router mode)
+// In router mode, models are loaded on-demand when chat completions are requested.
+// This endpoint pre-loads a model by making a minimal completion request.
 app.post('/api/models/load', async (req, res) => {
   const { model } = req.body;
 
@@ -979,26 +985,56 @@ app.post('/api/models/load', async (req, res) => {
     return res.status(400).json({ error: 'Missing model parameter' });
   }
 
+  // Resolve model name to full path to verify it exists
+  const modelPath = join(MODELS_DIR, model);
+  console.log(`[models/load] Attempting to load model: ${model}`);
+  console.log(`[models/load] Full path: ${modelPath}`);
+  addLog('models', `Loading model: ${model} (${modelPath})`);
+
+  // Verify model exists
+  if (!existsSync(modelPath)) {
+    console.error(`[models/load] Model file not found: ${modelPath}`);
+    addLog('models', `Model file not found: ${modelPath}`);
+    return res.status(404).json({ error: `Model file not found: ${model}` });
+  }
+
   try {
-    const response = await fetch(`http://localhost:${LLAMA_PORT}/models/load`, {
+    // In router mode, trigger model loading by making a minimal completion request
+    // llama.cpp will load the model on-demand
+    const response = await fetch(`http://localhost:${LLAMA_PORT}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model })
+      body: JSON.stringify({
+        model: model,
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 1
+      })
     });
 
     if (!response.ok) {
       const error = await response.text();
-      return res.status(response.status).json({ error });
+      console.error(`[models/load] llama.cpp error (${response.status}): ${error}`);
+      addLog('models', `Failed to load model: ${error}`);
+      return res.status(response.status).json({ error: `Failed to load model: ${error}` });
     }
 
-    const data = await response.json();
-    res.json({ success: true, ...data });
+    // Consume the response
+    await response.text();
+
+    console.log(`[models/load] Model loaded successfully: ${model}`);
+    addLog('models', `Model loaded: ${model}`);
+    res.json({ success: true, model });
   } catch (error) {
+    console.error(`[models/load] Error: ${error.message}`);
+    addLog('models', `Error loading model: ${error.message}`);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Unload a model from llama-server
+// Unload a model from llama-server (router mode)
+// In router mode, models are automatically unloaded when new models need to be loaded
+// and the max model limit is reached. This endpoint attempts to use the unload API
+// if available, otherwise returns a message about automatic unloading.
 app.post('/api/models/unload', async (req, res) => {
   const { model } = req.body;
 
@@ -1006,32 +1042,140 @@ app.post('/api/models/unload', async (req, res) => {
     return res.status(400).json({ error: 'Missing model parameter' });
   }
 
+  console.log(`[models/unload] Attempting to unload model: ${model}`);
+  addLog('models', `Unloading model: ${model}`);
+
   try {
+    // Try the unload endpoint (may not exist in router mode)
     const response = await fetch(`http://localhost:${LLAMA_PORT}/models/unload`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model })
     });
 
-    if (!response.ok) {
+    if (response.ok) {
+      const data = await response.json();
+      console.log(`[models/unload] Model unloaded successfully: ${model}`);
+      addLog('models', `Model unloaded: ${model}`);
+      res.json({ success: true, ...data });
+    } else if (response.status === 404) {
+      // Endpoint doesn't exist in router mode - this is expected
+      console.log(`[models/unload] Unload endpoint not available (router mode). Model will be unloaded automatically when needed.`);
+      res.json({
+        success: true,
+        message: 'In router mode, models are automatically unloaded when new models need to be loaded. The model will be unloaded when the slot is needed.'
+      });
+    } else {
       const error = await response.text();
+      console.error(`[models/unload] Error: ${error}`);
       return res.status(response.status).json({ error });
     }
-
-    const data = await response.json();
-    res.json({ success: true, ...data });
   } catch (error) {
+    console.error(`[models/unload] Error: ${error.message}`);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Get available presets
+// Get available presets (built-in + custom)
 app.get('/api/presets', (req, res) => {
+  const customPresets = config.customPresets || {};
   res.json({
-    presets: Object.values(OPTIMIZED_PRESETS),
+    presets: [...Object.values(OPTIMIZED_PRESETS), ...Object.values(customPresets)],
+    customPresets: Object.values(customPresets),
+    builtinPresets: Object.values(OPTIMIZED_PRESETS),
     currentPreset: currentPreset,
     mode: currentMode
   });
+});
+
+// Create a custom preset for a local model
+app.post('/api/presets/custom', (req, res) => {
+  const { id, name, description, modelPath, hfRepo, context, config: presetConfig } = req.body;
+
+  // Either modelPath or hfRepo must be provided
+  if (!id || !name || (!modelPath && !hfRepo)) {
+    return res.status(400).json({ error: 'Missing required fields: id, name, and either modelPath or hfRepo' });
+  }
+
+  let fullModelPath = null;
+
+  // If using local file path, validate it exists
+  if (modelPath && !hfRepo) {
+    fullModelPath = modelPath.startsWith('/') ? modelPath : join(MODELS_DIR, modelPath);
+    if (!existsSync(fullModelPath)) {
+      return res.status(404).json({ error: `Model file not found: ${modelPath}` });
+    }
+  }
+
+  // Create the custom preset
+  const preset = {
+    id,
+    name,
+    description: description || `Custom preset for ${name}`,
+    modelPath: fullModelPath,
+    hfRepo: hfRepo || null, // e.g., "unsloth/Qwen3-Coder-Next-GGUF:Q5_K_M"
+    isCustom: true,
+    context: context || 0,
+    config: {
+      chatTemplateKwargs: presetConfig?.chatTemplateKwargs || '',
+      reasoningFormat: presetConfig?.reasoningFormat || '',
+      temp: presetConfig?.temp ?? 0.7,
+      topP: presetConfig?.topP ?? 1.0,
+      topK: presetConfig?.topK ?? 20,
+      minP: presetConfig?.minP ?? 0,
+      extraSwitches: presetConfig?.extraSwitches || '--jinja'
+    }
+  };
+
+  // Save to config
+  if (!config.customPresets) {
+    config.customPresets = {};
+  }
+  config.customPresets[id] = preset;
+  saveConfig(config);
+
+  const modelInfo = hfRepo || modelPath;
+  console.log(`[presets] Created custom preset: ${id} for model ${modelInfo}`);
+  addLog('presets', `Created custom preset: ${name}`);
+
+  res.json({ success: true, preset });
+});
+
+// Update a custom preset
+app.put('/api/presets/custom/:presetId', (req, res) => {
+  const { presetId } = req.params;
+  const updates = req.body;
+
+  if (!config.customPresets || !config.customPresets[presetId]) {
+    return res.status(404).json({ error: `Custom preset '${presetId}' not found` });
+  }
+
+  // Update the preset
+  config.customPresets[presetId] = {
+    ...config.customPresets[presetId],
+    ...updates,
+    id: presetId, // Preserve ID
+    isCustom: true
+  };
+  saveConfig(config);
+
+  console.log(`[presets] Updated custom preset: ${presetId}`);
+  res.json({ success: true, preset: config.customPresets[presetId] });
+});
+
+// Delete a custom preset
+app.delete('/api/presets/custom/:presetId', (req, res) => {
+  const { presetId } = req.params;
+
+  if (!config.customPresets || !config.customPresets[presetId]) {
+    return res.status(404).json({ error: `Custom preset '${presetId}' not found` });
+  }
+
+  delete config.customPresets[presetId];
+  saveConfig(config);
+
+  console.log(`[presets] Deleted custom preset: ${presetId}`);
+  res.json({ success: true });
 });
 
 // Helper to stop llama server
@@ -1160,10 +1304,18 @@ app.post('/api/server/start', async (req, res) => {
   }
 });
 
-// Activate an optimized preset (single-model mode)
+// Activate a preset (single-model mode) - supports both built-in and custom presets
 app.post('/api/presets/:presetId/activate', async (req, res) => {
   const { presetId } = req.params;
-  const preset = OPTIMIZED_PRESETS[presetId];
+
+  // Check built-in presets first, then custom presets
+  let preset = OPTIMIZED_PRESETS[presetId];
+  let isCustom = false;
+
+  if (!preset && config.customPresets && config.customPresets[presetId]) {
+    preset = config.customPresets[presetId];
+    isCustom = true;
+  }
 
   if (!preset) {
     return res.status(404).json({ error: `Preset '${presetId}' not found` });
@@ -1175,21 +1327,54 @@ app.post('/api/presets/:presetId/activate', async (req, res) => {
     currentMode = 'single';
     currentPreset = presetId;
 
-    // Start single-model server with preset configuration
-    const startScript = join(PROJECT_ROOT, 'start-single-model.sh');
-    const env = {
-      ...process.env,
-      PRESET_ID: presetId,
-      PORT: String(LLAMA_PORT),
-      MODELS_DIR
-    };
+    if (isCustom) {
+      // Custom preset - supports both HF repo format and local model path
+      const startScript = join(PROJECT_ROOT, 'start-custom-preset.sh');
+      const env = {
+        ...process.env,
+        PORT: String(LLAMA_PORT),
+        MODELS_DIR,
+        // Use HF_REPO if available, otherwise MODEL_PATH
+        HF_REPO: preset.hfRepo || '',
+        MODEL_PATH: preset.hfRepo ? '' : (preset.modelPath || ''),
+        CONTEXT: String(preset.context || 0),
+        TEMP: String(preset.config?.temp ?? 0.7),
+        TOP_P: String(preset.config?.topP ?? 1.0),
+        TOP_K: String(preset.config?.topK ?? 20),
+        MIN_P: String(preset.config?.minP ?? 0),
+        CHAT_TEMPLATE_KWARGS: preset.config?.chatTemplateKwargs || '',
+        EXTRA_SWITCHES: preset.config?.extraSwitches || '--jinja'
+      };
 
-    llamaProcess = spawn('bash', [startScript], {
-      cwd: PROJECT_ROOT,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env,
-      detached: false
-    });
+      const modelInfo = preset.hfRepo || preset.modelPath;
+      console.log(`[presets] Activating custom preset: ${presetId} with model ${modelInfo}`);
+      console.log(`[presets] EXTRA_SWITCHES: ${env.EXTRA_SWITCHES}`);
+      addLog('presets', `Activating custom preset: ${preset.name}`);
+      addLog('presets', `EXTRA_SWITCHES: ${env.EXTRA_SWITCHES}`);
+
+      llamaProcess = spawn('bash', [startScript], {
+        cwd: PROJECT_ROOT,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env,
+        detached: false
+      });
+    } else {
+      // Built-in preset - use existing script
+      const startScript = join(PROJECT_ROOT, 'start-single-model.sh');
+      const env = {
+        ...process.env,
+        PRESET_ID: presetId,
+        PORT: String(LLAMA_PORT),
+        MODELS_DIR
+      };
+
+      llamaProcess = spawn('bash', [startScript], {
+        cwd: PROJECT_ROOT,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env,
+        detached: false
+      });
+    }
 
     llamaProcess.stdout.on('data', (data) => {
       addLog('llama', data);
@@ -1233,6 +1418,152 @@ app.post('/api/server/stop', async (req, res) => {
 
   res.json({ success: true });
 });
+
+// Update llama.cpp - pull latest and rebuild
+let llamaUpdateProcess = null;
+let llamaUpdateStatus = { status: 'idle', output: '', startedAt: null, completedAt: null };
+
+app.get('/api/llama/update/status', (req, res) => {
+  res.json(llamaUpdateStatus);
+});
+
+app.post('/api/llama/update', async (req, res) => {
+  if (llamaUpdateProcess && !llamaUpdateProcess.killed) {
+    return res.json({ success: false, error: 'Update already in progress' });
+  }
+
+  // Stop llama server if running
+  if (llamaProcess && !llamaProcess.killed) {
+    addLog('update', 'Stopping llama server before update...');
+    await stopLlamaServer();
+  }
+
+  llamaUpdateStatus = { status: 'updating', output: '', startedAt: new Date().toISOString(), completedAt: null };
+
+  // Run update script in distrobox
+  const updateScript = `
+    cd /home/yolan/llama.cpp && \
+    echo "=== Fetching latest changes ===" && \
+    git fetch origin master && \
+    echo "" && \
+    echo "=== Current version ===" && \
+    git log --oneline -1 && \
+    echo "" && \
+    echo "=== Pulling updates ===" && \
+    git checkout master && \
+    git pull origin master && \
+    echo "" && \
+    echo "=== New version ===" && \
+    git log --oneline -1 && \
+    echo "" && \
+    echo "=== Building llama.cpp ===" && \
+    cmake --build build -j$(nproc) && \
+    echo "" && \
+    echo "=== Installing ===" && \
+    cmake --install build --prefix ~/.local && \
+    echo "" && \
+    echo "=== Update complete ===" && \
+    llama-server --version
+  `;
+
+  const distrobox = existsSync('/usr/local/bin/distrobox') ? '/usr/local/bin/distrobox' : 'distrobox';
+
+  llamaUpdateProcess = spawn(distrobox, ['enter', CONTAINER_NAME, '--', 'bash', '-c', updateScript], {
+    env: {
+      ...process.env,
+      XDG_RUNTIME_DIR: '/run/user/1000',
+      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus'
+    }
+  });
+
+  llamaUpdateProcess.stdout.on('data', (data) => {
+    const text = data.toString();
+    llamaUpdateStatus.output += text;
+    addLog('update', text);
+    broadcast({ type: 'llama_update', data: { output: text, status: 'updating' } });
+  });
+
+  llamaUpdateProcess.stderr.on('data', (data) => {
+    const text = data.toString();
+    llamaUpdateStatus.output += text;
+    addLog('update', text);
+    broadcast({ type: 'llama_update', data: { output: text, status: 'updating' } });
+  });
+
+  llamaUpdateProcess.on('close', (code) => {
+    llamaUpdateStatus.completedAt = new Date().toISOString();
+    if (code === 0) {
+      llamaUpdateStatus.status = 'success';
+      addLog('update', 'llama.cpp update completed successfully');
+    } else {
+      llamaUpdateStatus.status = 'failed';
+      addLog('update', `llama.cpp update failed with code ${code}`);
+    }
+    broadcast({ type: 'llama_update', data: { status: llamaUpdateStatus.status, code } });
+    llamaUpdateProcess = null;
+  });
+
+  res.json({ success: true, message: 'Update started' });
+});
+
+// Helper: Flatten nested GGUF files to one level deep
+// Moves any .gguf files from subdirectories to the target directory root
+function flattenGgufFiles(targetDir) {
+  try {
+    const findGgufRecursive = (dir, depth = 0) => {
+      const files = [];
+      const entries = readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = join(dir, entry.name);
+        if (entry.isDirectory() && !entry.name.startsWith('.')) {
+          // Only recurse into non-hidden directories
+          files.push(...findGgufRecursive(fullPath, depth + 1));
+        } else if (entry.isFile() && entry.name.endsWith('.gguf') && depth > 0) {
+          // Only collect GGUF files that are nested (depth > 0)
+          files.push({ path: fullPath, name: entry.name });
+        }
+      }
+      return files;
+    };
+
+    const nestedFiles = findGgufRecursive(targetDir);
+
+    for (const file of nestedFiles) {
+      const destPath = join(targetDir, file.name);
+      if (!existsSync(destPath)) {
+        console.log(`[download] Flattening: ${file.path} -> ${destPath}`);
+        renameSync(file.path, destPath);
+      } else {
+        console.log(`[download] Skipping flatten (exists): ${file.name}`);
+      }
+    }
+
+    // Clean up empty subdirectories (not .cache)
+    const cleanEmptyDirs = (dir) => {
+      const entries = readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory() && !entry.name.startsWith('.')) {
+          const subDir = join(dir, entry.name);
+          cleanEmptyDirs(subDir);
+          // Remove if empty
+          try {
+            const remaining = readdirSync(subDir);
+            if (remaining.length === 0) {
+              rmdirSync(subDir);
+              console.log(`[download] Removed empty dir: ${subDir}`);
+            }
+          } catch (e) { /* ignore */ }
+        }
+      }
+    };
+    cleanEmptyDirs(targetDir);
+
+    return nestedFiles.length;
+  } catch (error) {
+    console.error(`[download] Error flattening files: ${error.message}`);
+    return 0;
+  }
+}
 
 // Download a model from HuggingFace to ~/models
 // Supports: quantization pattern, specific filename, or all GGUF files
@@ -1365,6 +1696,11 @@ app.post('/api/pull', async (req, res) => {
 
     downloadProcess.on('exit', (code) => {
       if (code === 0) {
+        // Flatten any nested GGUF files to one level deep
+        const flattened = flattenGgufFiles(targetDir);
+        if (flattened > 0) {
+          addLog('download', `Flattened ${flattened} nested GGUF file(s)`);
+        }
         downloadInfo.status = 'completed';
         downloadInfo.progress = 100;
         addLog('download', `Download completed: ${repo}`);
@@ -1940,14 +2276,38 @@ app.get('/api/analytics', (req, res) => {
   });
 });
 
-// OpenAI-compatible models endpoint
+// OpenAI-compatible models endpoint - returns models from llama.cpp that can be loaded
 app.get('/api/v1/models', async (req, res) => {
   try {
-    const response = await fetch(`http://localhost:${LLAMA_PORT}/v1/models`);
-    const data = await response.json();
+    // Get models from llama.cpp - these are the models that can actually be loaded
+    const response = await fetch(`http://localhost:${LLAMA_PORT}/models`);
+    if (!response.ok) {
+      throw new Error(`llama.cpp returned ${response.status}`);
+    }
+    const llamaModels = await response.json();
+
+    // Get aliases from config
+    const aliases = config.modelAliases || {};
+
+    // Format with our extra info
+    const data = {
+      object: 'list',
+      data: (llamaModels.data || []).map(m => ({
+        id: m.id,
+        object: 'model',
+        created: m.created || Math.floor(Date.now() / 1000),
+        owned_by: m.owned_by || 'llamacpp',
+        // Include extra info for UI
+        displayName: m.id, // Use the llama.cpp ID as display name
+        status: m.status?.value || 'unknown',
+        alias: aliases[m.id] || null
+      }))
+    };
     res.json(data);
   } catch (error) {
-    res.status(502).json({ error: 'Failed to reach llama server', details: error.message });
+    console.error('[v1/models] Error fetching from llama.cpp:', error.message);
+    // Fallback to empty list if llama.cpp is not available
+    res.json({ object: 'list', data: [] });
   }
 });
 
@@ -1955,6 +2315,9 @@ app.get('/api/v1/models', async (req, res) => {
 app.post('/api/v1/chat/completions', async (req, res) => {
   const startTime = Date.now();
   const isStreaming = req.body.stream === true;
+  const requestedModel = req.body.model || 'default';
+
+  console.log(`[chat/completions] Request for model: ${requestedModel}`);
 
   try {
     const response = await fetch(`http://localhost:${LLAMA_PORT}/v1/chat/completions`, {
@@ -1965,6 +2328,8 @@ app.post('/api/v1/chat/completions', async (req, res) => {
 
     if (!response.ok) {
       const error = await response.text();
+      console.error(`[chat/completions] Error ${response.status} for model ${requestedModel}: ${error}`);
+      addLog('chat', `Chat completion failed for model ${requestedModel}: ${error}`);
       return res.status(response.status).send(error);
     }
 

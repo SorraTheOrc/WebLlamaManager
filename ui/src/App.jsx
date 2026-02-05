@@ -3,6 +3,8 @@ import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart
 } from 'recharts';
+import hljs from 'highlight.js';
+import 'highlight.js/styles/github-dark.css';
 import './App.css';
 
 const API_BASE = '/api';
@@ -26,6 +28,238 @@ function formatUptime(ms) {
   if (hours > 0) return `${hours}h ${minutes % 60}m`;
   if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
   return `${seconds}s`;
+}
+
+// Format model name for display: remove .gguf extension and split part numbers
+function formatModelName(model) {
+  const name = model.alias || model.displayName || model.id || model.model || '';
+  return name
+    .replace(/-\d{5}-of-\d{5}\.gguf$/i, '')  // Remove part suffix like -00001-of-00002.gguf
+    .replace(/\.gguf$/i, '');                 // Remove .gguf extension
+}
+
+// Code block component with syntax highlighting and copy button
+function CodeBlock({ code, language }) {
+  const [copied, setCopied] = useState(false);
+  const codeRef = useRef(null);
+
+  useEffect(() => {
+    if (codeRef.current && language) {
+      // Reset any previous highlighting
+      codeRef.current.removeAttribute('data-highlighted');
+      try {
+        hljs.highlightElement(codeRef.current);
+      } catch (e) {
+        // Language not supported, fall back to plain text
+      }
+    }
+  }, [code, language]);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
+
+  const handleOpenHtml = () => {
+    const blob = new Blob([code], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank');
+    // Clean up the blob URL after a delay
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const isHtml = language?.toLowerCase() === 'html';
+
+  return (
+    <div className="code-block">
+      <div className="code-block-header">
+        <span className="code-block-language">{language || 'text'}</span>
+        <div className="code-block-actions">
+          {isHtml && (
+            <button className="code-block-open" onClick={handleOpenHtml} title="Open HTML in new tab">
+              Open
+            </button>
+          )}
+          <button className="code-block-copy" onClick={handleCopy} title="Copy code">
+            {copied ? '✓ Copied' : 'Copy'}
+          </button>
+        </div>
+      </div>
+      <pre>
+        <code ref={codeRef} className={language ? `language-${language}` : ''}>
+          {code}
+        </code>
+      </pre>
+    </div>
+  );
+}
+
+// Parse message content and render code blocks with syntax highlighting
+function parseMessageWithCodeBlocks(content) {
+  if (typeof content !== 'string') return content;
+
+  // Regex to match complete code blocks: ```language\ncode\n```
+  const codeBlockRegex = /```(\w*)\n?([\s\S]*?)```/g;
+  const parts = [];
+  let lastIndex = 0;
+  let match;
+  let key = 0;
+
+  while ((match = codeBlockRegex.exec(content)) !== null) {
+    // Add text before the code block
+    if (match.index > lastIndex) {
+      const textBefore = content.slice(lastIndex, match.index);
+      parts.push(<span key={key++}>{textBefore}</span>);
+    }
+
+    // Add the code block
+    const language = match[1] || '';
+    const code = match[2].trim();
+    parts.push(<CodeBlock key={key++} code={code} language={language} />);
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  // Check for unclosed code block at the end (streaming)
+  const remaining = content.slice(lastIndex);
+  const unclosedMatch = remaining.match(/```(\w*)\n?([\s\S]*)$/);
+
+  if (unclosedMatch) {
+    // Add text before the unclosed code block
+    const textBefore = remaining.slice(0, unclosedMatch.index);
+    if (textBefore) {
+      parts.push(<span key={key++}>{textBefore}</span>);
+    }
+    // Add the unclosed code block (still being streamed)
+    const language = unclosedMatch[1] || '';
+    const code = unclosedMatch[2] || '';
+    parts.push(<CodeBlock key={key++} code={code} language={language} />);
+  } else if (remaining) {
+    // Add any remaining text after the last code block
+    parts.push(<span key={key++}>{remaining}</span>);
+  }
+
+  return parts.length > 0 ? parts : content;
+}
+
+// Searchable select component for model dropdowns
+function SearchableSelect({
+  value,
+  onChange,
+  options,
+  placeholder = 'Select...',
+  disabled = false,
+  storageKey = null,
+  formatOption = (opt) => opt.label || opt.id || opt.value || opt
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const containerRef = useRef(null);
+  const inputRef = useRef(null);
+
+  // Load from localStorage on mount if storageKey provided
+  useEffect(() => {
+    if (storageKey && !value) {
+      const saved = localStorage.getItem(storageKey);
+      if (saved && options.some(opt => (opt.value || opt.id || opt) === saved)) {
+        onChange(saved);
+      }
+    }
+  }, [storageKey, options]);
+
+  // Save to localStorage when value changes
+  useEffect(() => {
+    if (storageKey && value) {
+      localStorage.setItem(storageKey, value);
+    }
+  }, [storageKey, value]);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setIsOpen(false);
+        setSearch('');
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Filter options based on search
+  const filteredOptions = options.filter(opt => {
+    const label = formatOption(opt).toLowerCase();
+    const val = (opt.value || opt.id || opt).toString().toLowerCase();
+    const searchLower = search.toLowerCase();
+    return label.includes(searchLower) || val.includes(searchLower);
+  });
+
+  // Get display value
+  const selectedOption = options.find(opt => (opt.value || opt.id || opt) === value);
+  const displayValue = selectedOption ? formatOption(selectedOption) : placeholder;
+
+  const handleSelect = (opt) => {
+    const val = opt.value || opt.id || opt;
+    onChange(val);
+    setIsOpen(false);
+    setSearch('');
+  };
+
+  return (
+    <div className={`searchable-select ${disabled ? 'disabled' : ''}`} ref={containerRef}>
+      <div
+        className={`searchable-select-trigger ${isOpen ? 'open' : ''}`}
+        onClick={() => {
+          if (!disabled) {
+            setIsOpen(!isOpen);
+            if (!isOpen) setTimeout(() => inputRef.current?.focus(), 0);
+          }
+        }}
+        title={value ? displayValue : ''}
+      >
+        <span className={value ? '' : 'placeholder'}>{displayValue}</span>
+        <span className="searchable-select-arrow">▼</span>
+      </div>
+      {isOpen && (
+        <div className="searchable-select-dropdown">
+          <input
+            ref={inputRef}
+            type="text"
+            className="searchable-select-search"
+            placeholder="Search..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+          />
+          <div className="searchable-select-options">
+            {filteredOptions.length === 0 ? (
+              <div className="searchable-select-no-results">No matches found</div>
+            ) : (
+              filteredOptions.map((opt, idx) => {
+                const val = opt.value || opt.id || opt;
+                const label = formatOption(opt);
+                return (
+                  <div
+                    key={val || idx}
+                    className={`searchable-select-option ${val === value ? 'selected' : ''}`}
+                    onClick={() => handleSelect(opt)}
+                    title={label}
+                  >
+                    {label}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // WebSocket hook for real-time stats and logs
@@ -762,21 +996,52 @@ function Dashboard({ stats }) {
 // Presets Page
 function PresetsPage({ stats }) {
   const [presets, setPresets] = useState([]);
+  const [customPresets, setCustomPresets] = useState([]);
+  const [localModels, setLocalModels] = useState([]);
   const [loading, setLoading] = useState({});
+  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [editingPreset, setEditingPreset] = useState(null);
+  const [newPreset, setNewPreset] = useState({
+    id: '',
+    name: '',
+    description: '',
+    modelPath: '',
+    context: 0,
+    config: {
+      temp: 0.7,
+      topP: 1.0,
+      topK: 20,
+      minP: 0,
+      chatTemplateKwargs: '',
+      extraSwitches: '--jinja'
+    }
+  });
 
   const fetchPresets = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/presets`);
       const data = await res.json();
-      setPresets(data.presets || []);
+      setPresets(data.builtinPresets || []);
+      setCustomPresets(data.customPresets || []);
     } catch (err) {
       console.error('Failed to fetch presets:', err);
     }
   }, []);
 
+  const fetchModels = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/models`);
+      const data = await res.json();
+      setLocalModels(data.localModels || []);
+    } catch (err) {
+      console.error('Failed to fetch models:', err);
+    }
+  }, []);
+
   useEffect(() => {
     fetchPresets();
-  }, [fetchPresets]);
+    fetchModels();
+  }, [fetchPresets, fetchModels]);
 
   const activatePreset = async (presetId) => {
     setLoading(l => ({ ...l, [presetId]: true }));
@@ -798,6 +1063,45 @@ function PresetsPage({ stats }) {
     setLoading(l => ({ ...l, router: false }));
   };
 
+  const createCustomPreset = async () => {
+    if (!newPreset.id || !newPreset.name || !newPreset.modelPath) {
+      alert('Please fill in ID, Name, and select a model');
+      return;
+    }
+    setLoading(l => ({ ...l, create: true }));
+    try {
+      const res = await fetch(`${API_BASE}/presets/custom`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newPreset)
+      });
+      if (res.ok) {
+        await fetchPresets();
+        setShowCreateForm(false);
+        setNewPreset({
+          id: '', name: '', description: '', modelPath: '', context: 0,
+          config: { temp: 0.7, topP: 1.0, topK: 20, minP: 0, chatTemplateKwargs: '', extraSwitches: '--jinja' }
+        });
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Failed to create preset');
+      }
+    } catch (err) {
+      console.error('Failed to create preset:', err);
+    }
+    setLoading(l => ({ ...l, create: false }));
+  };
+
+  const deleteCustomPreset = async (presetId) => {
+    if (!confirm(`Delete preset "${presetId}"?`)) return;
+    try {
+      await fetch(`${API_BASE}/presets/custom/${presetId}`, { method: 'DELETE' });
+      await fetchPresets();
+    } catch (err) {
+      console.error('Failed to delete preset:', err);
+    }
+  };
+
   const isSingleMode = stats?.mode === 'single';
   const activePreset = stats?.preset;
   const isHealthy = stats?.llama?.status === 'ok';
@@ -806,78 +1110,266 @@ function PresetsPage({ stats }) {
     <div className="page">
       <div className="page-header">
         <h2>Optimized Presets</h2>
-        {isSingleMode && (
-          <span className="mode-badge single">Single Model Mode</span>
-        )}
+        <div className="page-header-actions">
+          {isSingleMode && (
+            <span className="mode-badge single">Single Model Mode</span>
+          )}
+          <button className="btn-primary" onClick={() => setShowCreateForm(!showCreateForm)}>
+            {showCreateForm ? 'Cancel' : '+ Create Preset'}
+          </button>
+        </div>
       </div>
 
       <p className="page-description">
         Pre-configured models with optimized settings. Activating a preset runs the server in single-model mode with specific parameters.
       </p>
 
-      <div className="presets-grid">
-        {presets.map((preset) => {
-          const isActive = activePreset?.id === preset.id;
-          const isLoading = loading[preset.id];
-          const isStarting = isActive && !isHealthy;
+      {/* Create Custom Preset Form */}
+      {showCreateForm && (
+        <div className="create-preset-form">
+          <h3>Create Custom Preset</h3>
+          <div className="form-grid">
+            <div className="form-group">
+              <label>Preset ID</label>
+              <input
+                type="text"
+                placeholder="my-preset"
+                value={newPreset.id}
+                onChange={(e) => setNewPreset(p => ({ ...p, id: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-') }))}
+              />
+            </div>
+            <div className="form-group">
+              <label>Name</label>
+              <input
+                type="text"
+                placeholder="My Custom Preset"
+                value={newPreset.name}
+                onChange={(e) => setNewPreset(p => ({ ...p, name: e.target.value }))}
+              />
+            </div>
+            <div className="form-group full-width">
+              <label>Description</label>
+              <input
+                type="text"
+                placeholder="Optional description"
+                value={newPreset.description}
+                onChange={(e) => setNewPreset(p => ({ ...p, description: e.target.value }))}
+              />
+            </div>
+            <div className="form-group full-width">
+              <label>Model</label>
+              <SearchableSelect
+                value={newPreset.modelPath}
+                onChange={(val) => setNewPreset(p => ({ ...p, modelPath: val }))}
+                options={localModels.map(m => ({ value: m.name, label: formatModelName(m) }))}
+                placeholder="Select a local model..."
+                storageKey="lastPresetModel"
+              />
+            </div>
+            <div className="form-group">
+              <label>Context Size (0 = default)</label>
+              <input
+                type="number"
+                value={newPreset.context}
+                onChange={(e) => setNewPreset(p => ({ ...p, context: parseInt(e.target.value) || 0 }))}
+              />
+            </div>
+            <div className="form-group">
+              <label>Temperature</label>
+              <input
+                type="number"
+                step="0.1"
+                value={newPreset.config.temp}
+                onChange={(e) => setNewPreset(p => ({ ...p, config: { ...p.config, temp: parseFloat(e.target.value) || 0.7 } }))}
+              />
+            </div>
+            <div className="form-group">
+              <label>Top P</label>
+              <input
+                type="number"
+                step="0.1"
+                value={newPreset.config.topP}
+                onChange={(e) => setNewPreset(p => ({ ...p, config: { ...p.config, topP: parseFloat(e.target.value) || 1.0 } }))}
+              />
+            </div>
+            <div className="form-group">
+              <label>Top K</label>
+              <input
+                type="number"
+                value={newPreset.config.topK}
+                onChange={(e) => setNewPreset(p => ({ ...p, config: { ...p.config, topK: parseInt(e.target.value) || 0 } }))}
+              />
+            </div>
+            <div className="form-group full-width">
+              <label>Extra Switches</label>
+              <input
+                type="text"
+                placeholder="--jinja"
+                value={newPreset.config.extraSwitches}
+                onChange={(e) => setNewPreset(p => ({ ...p, config: { ...p.config, extraSwitches: e.target.value } }))}
+              />
+            </div>
+            <div className="form-group full-width">
+              <label>Chat Template Kwargs (JSON)</label>
+              <input
+                type="text"
+                placeholder='{"reasoning_effort": "high"}'
+                value={newPreset.config.chatTemplateKwargs}
+                onChange={(e) => setNewPreset(p => ({ ...p, config: { ...p.config, chatTemplateKwargs: e.target.value } }))}
+              />
+            </div>
+          </div>
+          <div className="form-actions">
+            <button className="btn-secondary" onClick={() => setShowCreateForm(false)}>Cancel</button>
+            <button className="btn-primary" onClick={createCustomPreset} disabled={loading.create}>
+              {loading.create ? 'Creating...' : 'Create Preset'}
+            </button>
+          </div>
+        </div>
+      )}
 
-          return (
-            <div key={preset.id} className={`preset-card ${isActive ? 'active' : ''} ${isLoading ? 'loading' : ''}`}>
-              <div className="preset-header">
-                <h3>{preset.name}</h3>
-                {isActive && isHealthy && <span className="badge success">Active</span>}
-                {isStarting && <span className="badge warning">Starting...</span>}
-              </div>
+      {/* Custom Presets Section */}
+      {customPresets.length > 0 && (
+        <section className="page-section">
+          <h3>Custom Presets</h3>
+          <div className="presets-grid">
+            {customPresets.map((preset) => {
+              const isActive = activePreset?.id === preset.id;
+              const isLoading = loading[preset.id];
+              const isStarting = isActive && !isHealthy;
 
-              <p className="preset-description">{preset.description}</p>
+              return (
+                <div key={preset.id} className={`preset-card custom ${isActive ? 'active' : ''} ${isLoading ? 'loading' : ''}`}>
+                  <div className="preset-header">
+                    <h3>{preset.name}</h3>
+                    <span className="badge info">Custom</span>
+                    {isActive && isHealthy && <span className="badge success">Active</span>}
+                    {isStarting && <span className="badge warning">Starting...</span>}
+                  </div>
 
-              <div className="preset-details">
-                <div className="detail-row">
-                  <span className="detail-label">Repository</span>
-                  <span className="detail-value">{preset.repo}</span>
+                  <p className="preset-description">{preset.description}</p>
+
+                  <div className="preset-details">
+                    <div className="detail-row">
+                      <span className="detail-label">Model</span>
+                      <span className="detail-value">{preset.modelPath?.split('/').pop()}</span>
+                    </div>
+                    {preset.context > 0 && (
+                      <div className="detail-row">
+                        <span className="detail-label">Context</span>
+                        <span className="detail-value">{preset.context.toLocaleString()}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {(isLoading || isStarting) && (
+                    <div className="preset-loading">
+                      <div className="loading-spinner" />
+                      <span>{isLoading ? 'Activating...' : 'Starting server...'}</span>
+                    </div>
+                  )}
+
+                  <div className="preset-actions">
+                    {isActive ? (
+                      <button
+                        className="btn-secondary full-width"
+                        onClick={switchToRouterMode}
+                        disabled={loading.router || isStarting}
+                      >
+                        {loading.router ? 'Switching...' : 'Switch to Router Mode'}
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          className="btn-primary"
+                          onClick={() => activatePreset(preset.id)}
+                          disabled={isLoading}
+                        >
+                          {isLoading ? 'Activating...' : 'Activate'}
+                        </button>
+                        <button
+                          className="btn-danger"
+                          onClick={() => deleteCustomPreset(preset.id)}
+                        >
+                          Delete
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
-                <div className="detail-row">
-                  <span className="detail-label">Quantization</span>
-                  <span className="detail-value quant">{preset.quantization}</span>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* Built-in Presets Section */}
+      <section className="page-section">
+        <h3>Built-in Presets</h3>
+        <div className="presets-grid">
+          {presets.map((preset) => {
+            const isActive = activePreset?.id === preset.id;
+            const isLoading = loading[preset.id];
+            const isStarting = isActive && !isHealthy;
+
+            return (
+              <div key={preset.id} className={`preset-card ${isActive ? 'active' : ''} ${isLoading ? 'loading' : ''}`}>
+                <div className="preset-header">
+                  <h3>{preset.name}</h3>
+                  {isActive && isHealthy && <span className="badge success">Active</span>}
+                  {isStarting && <span className="badge warning">Starting...</span>}
                 </div>
-                {preset.context > 0 && (
+
+                <p className="preset-description">{preset.description}</p>
+
+                <div className="preset-details">
                   <div className="detail-row">
-                    <span className="detail-label">Context</span>
-                    <span className="detail-value">{preset.context.toLocaleString()}</span>
+                    <span className="detail-label">Repository</span>
+                    <span className="detail-value">{preset.repo}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Quantization</span>
+                    <span className="detail-value quant">{preset.quantization}</span>
+                  </div>
+                  {preset.context > 0 && (
+                    <div className="detail-row">
+                      <span className="detail-label">Context</span>
+                      <span className="detail-value">{preset.context.toLocaleString()}</span>
+                    </div>
+                  )}
+                </div>
+
+                {(isLoading || isStarting) && (
+                  <div className="preset-loading">
+                    <div className="loading-spinner" />
+                    <span>{isLoading ? 'Activating...' : 'Starting server...'}</span>
                   </div>
                 )}
-              </div>
 
-              {(isLoading || isStarting) && (
-                <div className="preset-loading">
-                  <div className="loading-spinner" />
-                  <span>{isLoading ? 'Activating...' : 'Starting server...'}</span>
+                <div className="preset-actions">
+                  {isActive ? (
+                    <button
+                      className="btn-secondary full-width"
+                      onClick={switchToRouterMode}
+                      disabled={loading.router || isStarting}
+                    >
+                      {loading.router ? 'Switching...' : 'Switch to Router Mode'}
+                    </button>
+                  ) : (
+                    <button
+                      className="btn-primary full-width"
+                      onClick={() => activatePreset(preset.id)}
+                      disabled={isLoading}
+                    >
+                      {isLoading ? 'Activating...' : 'Activate'}
+                    </button>
+                  )}
                 </div>
-              )}
-
-              <div className="preset-actions">
-                {isActive ? (
-                  <button
-                    className="btn-secondary full-width"
-                    onClick={switchToRouterMode}
-                    disabled={loading.router || isStarting}
-                  >
-                    {loading.router ? 'Switching...' : 'Switch to Router Mode'}
-                  </button>
-                ) : (
-                  <button
-                    className="btn-primary full-width"
-                    onClick={() => activatePreset(preset.id)}
-                    disabled={isLoading}
-                  >
-                    {isLoading ? 'Activating...' : 'Activate'}
-                  </button>
-                )}
               </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      </section>
     </div>
   );
 }
@@ -2036,6 +2528,8 @@ function SettingsPage() {
         </div>
       </section>
 
+      <LlamaCppUpdateSection />
+
       <section className="page-section">
         <h3>Current Configuration</h3>
         <pre className="settings-preview">
@@ -2043,6 +2537,109 @@ function SettingsPage() {
         </pre>
       </section>
     </div>
+  );
+}
+
+// llama.cpp Update Section Component
+function LlamaCppUpdateSection() {
+  const [updating, setUpdating] = useState(false);
+  const [status, setStatus] = useState(null);
+  const [output, setOutput] = useState('');
+  const outputRef = useRef(null);
+
+  // Check initial status
+  useEffect(() => {
+    fetch(`${API_BASE}/llama/update/status`)
+      .then(res => res.json())
+      .then(data => {
+        setStatus(data.status);
+        setOutput(data.output || '');
+        if (data.status === 'updating') {
+          setUpdating(true);
+        }
+      })
+      .catch(err => console.error('Failed to fetch update status:', err));
+  }, []);
+
+  // Subscribe to WebSocket updates
+  useEffect(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'llama_update') {
+          if (msg.data.output) {
+            setOutput(prev => prev + msg.data.output);
+          }
+          if (msg.data.status && msg.data.status !== 'updating') {
+            setStatus(msg.data.status);
+            setUpdating(false);
+          }
+        }
+      } catch (e) {
+        // Ignore non-JSON messages
+      }
+    };
+
+    return () => ws.close();
+  }, []);
+
+  // Auto-scroll output
+  useEffect(() => {
+    if (outputRef.current) {
+      outputRef.current.scrollTop = outputRef.current.scrollHeight;
+    }
+  }, [output]);
+
+  const startUpdate = async () => {
+    setUpdating(true);
+    setStatus('updating');
+    setOutput('');
+    try {
+      const res = await fetch(`${API_BASE}/llama/update`, { method: 'POST' });
+      const data = await res.json();
+      if (!data.success) {
+        setStatus('failed');
+        setOutput(data.error || 'Failed to start update');
+        setUpdating(false);
+      }
+    } catch (err) {
+      setStatus('failed');
+      setOutput('Failed to start update: ' + err.message);
+      setUpdating(false);
+    }
+  };
+
+  return (
+    <section className="page-section">
+      <h3>llama.cpp Updates</h3>
+      <div className="setting-item">
+        <p className="setting-hint">
+          Pull the latest llama.cpp changes from GitHub and rebuild. This will stop any running llama server during the update.
+        </p>
+        <button
+          className={`btn-secondary ${updating ? 'disabled' : ''}`}
+          onClick={startUpdate}
+          disabled={updating}
+        >
+          {updating ? 'Updating...' : 'Update llama.cpp'}
+        </button>
+        {status && status !== 'idle' && (
+          <span className={`update-status ${status}`}>
+            {status === 'updating' && ' Building...'}
+            {status === 'success' && ' Update complete'}
+            {status === 'failed' && ' Update failed'}
+          </span>
+        )}
+      </div>
+      {output && (
+        <pre className="update-output" ref={outputRef}>
+          {output}
+        </pre>
+      )}
+    </section>
   );
 }
 
@@ -2541,15 +3138,13 @@ function ApiDocsPage() {
                             rows={4}
                           />
                         ) : param.name === 'model' && activeTab === 'openai' && openaiModels.length > 0 ? (
-                          <select
+                          <SearchableSelect
                             value={params[param.name] ?? ''}
-                            onChange={(e) => handleParamChange(param.name, e.target.value, 'string')}
-                          >
-                            <option value="">-- Select model --</option>
-                            {openaiModels.map(m => (
-                              <option key={m.id} value={m.id}>{m.id}</option>
-                            ))}
-                          </select>
+                            onChange={(val) => handleParamChange(param.name, val, 'string')}
+                            options={openaiModels.map(m => ({ value: m.id, label: m.id }))}
+                            placeholder="-- Select model --"
+                            storageKey="lastApiDocsModel"
+                          />
                         ) : (
                           <input
                             type={param.type === 'number' ? 'number' : 'text'}
@@ -2875,12 +3470,14 @@ function StatsHeader({ stats }) {
 
 // Query Panel Component
 function QueryPanel({ stats }) {
+  const location = useLocation();
   const [isOpen, setIsOpen] = useState(false);
   const [models, setModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState(() => {
     return localStorage.getItem('lastSelectedModel') || '';
   });
   const [prompt, setPrompt] = useState('');
+  const [conversationId, setConversationId] = useState(null); // Track current conversation
   const [messages, setMessages] = useState([]); // Each message: { role, content, stats? }
   const [isLoading, setIsLoading] = useState(false);
   const [streamingMessage, setStreamingMessage] = useState('');
@@ -2900,13 +3497,41 @@ function QueryPanel({ stats }) {
     }
   };
 
-  // Compute base URL for llama.cpp API
-  const llamaBaseUrl = stats?.llamaUiUrl || `http://${window.location.hostname}:${stats?.llamaPort || 5251}`;
+  // Save conversation to shared localStorage (same as ChatPage)
+  const saveToSharedHistory = (convId, title, model, msgs) => {
+    try {
+      const saved = localStorage.getItem('chat_conversations');
+      const conversations = saved ? JSON.parse(saved) : [];
+      const existingIndex = conversations.findIndex(c => c.id === convId);
+      const conversation = {
+        id: convId,
+        title: title,
+        model: model,
+        messages: msgs.map(m => ({
+          id: m.id?.toString() || Date.now().toString(),
+          role: m.role,
+          content: m.content,
+          timestamp: m.stats?.timestamp || new Date().toISOString(),
+          stats: m.stats || null
+        })),
+        createdAt: existingIndex >= 0 ? conversations[existingIndex].createdAt : new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      if (existingIndex >= 0) {
+        conversations[existingIndex] = conversation;
+      } else {
+        conversations.unshift(conversation);
+      }
+      localStorage.setItem('chat_conversations', JSON.stringify(conversations));
+    } catch (err) {
+      console.error('Failed to save conversation:', err);
+    }
+  };
 
-  // Fetch available models
+  // Fetch available models from our API (all local models)
   const fetchModels = useCallback(async () => {
     try {
-      const response = await fetch(`${llamaBaseUrl}/models`);
+      const response = await fetch(`${API_BASE}/v1/models`);
       if (response.ok) {
         const data = await response.json();
         const modelList = data.data || data || [];
@@ -2922,7 +3547,7 @@ function QueryPanel({ stats }) {
     } catch (err) {
       console.error('Failed to fetch models:', err);
     }
-  }, [llamaBaseUrl, selectedModel]);
+  }, [selectedModel]);
 
   useEffect(() => {
     if (isOpen) {
@@ -2934,6 +3559,11 @@ function QueryPanel({ stats }) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, streamingMessage]);
 
+  // Hide on chat page - use the full-featured chat there
+  if (location.pathname === '/chat') {
+    return null;
+  }
+
   const handleModelChange = (e) => {
     const model = e.target.value;
     setSelectedModel(model);
@@ -2944,12 +3574,26 @@ function QueryPanel({ stats }) {
     e.preventDefault();
     if (!prompt.trim() || isLoading) return;
 
+    // Create a new conversation if this is the first message
+    let currentConvId = conversationId;
+    const isFirstMessage = messages.length === 0;
+    if (isFirstMessage) {
+      currentConvId = `fab-${Date.now()}`;
+      setConversationId(currentConvId);
+    }
+
     const messageId = Date.now();
     const userMessage = { id: messageId, role: 'user', content: prompt.trim() };
-    setMessages(prev => [...prev, userMessage]);
+    const newMessages = [...messages, userMessage];
+    setMessages(newMessages);
     setPrompt('');
     setIsLoading(true);
     setStreamingMessage('');
+
+    // Generate title from first message
+    const title = isFirstMessage
+      ? prompt.trim().slice(0, 50) + (prompt.trim().length > 50 ? '...' : '')
+      : null;
 
     const startTime = Date.now();
     let tokenCount = 0;
@@ -2961,7 +3605,7 @@ function QueryPanel({ stats }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: selectedModel,
-          messages: [...messages, userMessage].map(m => ({ role: m.role, content: m.content })),
+          messages: newMessages.map(m => ({ role: m.role, content: m.content })),
           stream: true
         })
       });
@@ -3023,13 +3667,20 @@ function QueryPanel({ stats }) {
         timestamp: new Date().toISOString()
       };
 
-      setMessages(prev => [...prev, {
+      const assistantMessage = {
         id: Date.now(),
         role: 'assistant',
         content: fullContent,
         stats: messageStats
-      }]);
+      };
+
+      const finalMessages = [...newMessages, assistantMessage];
+      setMessages(finalMessages);
       setStreamingMessage('');
+
+      // Save to shared history so ChatPage can see it
+      const convTitle = title || (messages.length === 0 ? prompt.trim().slice(0, 50) : 'Quick Chat');
+      saveToSharedHistory(currentConvId, convTitle, selectedModel, finalMessages);
     } catch (err) {
       console.error('Query failed:', err);
       setMessages(prev => [...prev, {
@@ -3054,6 +3705,7 @@ function QueryPanel({ stats }) {
     setMessages([]);
     setStreamingMessage('');
     setHoveredMessage(null);
+    setConversationId(null); // Start fresh conversation next time
   };
 
   const isHealthy = stats?.llama?.status === 'ok';
@@ -3072,21 +3724,20 @@ function QueryPanel({ stats }) {
         <div className="query-header">
           <h3>Query Panel</h3>
           <div className="query-controls">
-            <select
+            <SearchableSelect
               value={selectedModel}
-              onChange={handleModelChange}
+              onChange={(val) => {
+                setSelectedModel(val);
+                localStorage.setItem('queryPanelModel', val);
+              }}
+              options={models.length === 0 ? [] : models.map(m => ({
+                value: m.id || m.model,
+                label: formatModelName(m)
+              }))}
+              placeholder={models.length === 0 ? "No models available" : "Select model..."}
               disabled={!isHealthy || models.length === 0}
-            >
-              {models.length === 0 ? (
-                <option value="">No models available</option>
-              ) : (
-                models.map((model) => (
-                  <option key={model.id || model.model} value={model.id || model.model}>
-                    {model.id || model.model}
-                  </option>
-                ))
-              )}
-            </select>
+              storageKey="queryPanelModel"
+            />
             <button className="btn-ghost btn-small" onClick={clearChat} title="Clear chat">
               🗑️
             </button>
@@ -3104,16 +3755,11 @@ function QueryPanel({ stats }) {
             <div
               key={msg.id}
               className={`query-message ${msg.role}`}
-              onMouseMove={(e) => {
-                if (msg.stats) {
-                  setHoveredMessage(msg.id);
-                  setTooltipPos({ x: e.clientX + 10, y: e.clientY + 10 });
-                }
-              }}
-              onMouseLeave={() => setHoveredMessage(null)}
             >
               <div className="message-header">
-                <span className="message-role">{msg.role === 'user' ? 'You' : 'AI'}</span>
+                <span className="message-role">
+                  {msg.role === 'user' ? 'You' : `AI${msg.stats?.model ? ` - ${formatModelName({ id: msg.stats.model })}` : ''}`}
+                </span>
                 <div className="message-actions">
                   <button
                     className={`btn-icon ${copiedId === msg.id ? 'copied' : ''}`}
@@ -3124,37 +3770,10 @@ function QueryPanel({ stats }) {
                   </button>
                 </div>
               </div>
-              <div className="message-content">{msg.content}</div>
-              {/* Stats tooltip on hover for assistant messages */}
-              {msg.role === 'assistant' && msg.stats && hoveredMessage === msg.id && (
-                <div
-                  className="message-stats-tooltip"
-                  style={{ left: tooltipPos.x, top: tooltipPos.y }}
-                >
-                  <div className="stats-tooltip-row">
-                    <span className="stats-label">Model:</span>
-                    <span className="stats-value">{msg.stats.model}</span>
-                  </div>
-                  <div className="stats-tooltip-row">
-                    <span className="stats-label">Speed:</span>
-                    <span className="stats-value">{msg.stats.tokensPerSecond} tok/s</span>
-                  </div>
-                  <div className="stats-tooltip-row">
-                    <span className="stats-label">Completion:</span>
-                    <span className="stats-value">{msg.stats.completionTokens} tokens</span>
-                  </div>
-                  <div className="stats-tooltip-row">
-                    <span className="stats-label">Prompt:</span>
-                    <span className="stats-value">{msg.stats.promptTokens} tokens</span>
-                  </div>
-                  <div className="stats-tooltip-row">
-                    <span className="stats-label">Total:</span>
-                    <span className="stats-value">{msg.stats.totalTokens} tokens</span>
-                  </div>
-                  <div className="stats-tooltip-row">
-                    <span className="stats-label">Duration:</span>
-                    <span className="stats-value">{(msg.stats.duration / 1000).toFixed(2)}s</span>
-                  </div>
+              <div className="message-content">{parseMessageWithCodeBlocks(msg.content)}</div>
+              {msg.role === 'assistant' && msg.stats && (
+                <div className="message-stats-inline">
+                  {msg.stats.tokensPerSecond} tok/s · {msg.stats.completionTokens} tokens · {(msg.stats.duration / 1000).toFixed(2)}s
                 </div>
               )}
             </div>
@@ -3162,9 +3781,9 @@ function QueryPanel({ stats }) {
           {streamingMessage && (
             <div className="query-message assistant streaming">
               <div className="message-header">
-                <span className="message-role">AI</span>
+                <span className="message-role">AI{selectedModel ? ` - ${formatModelName({ id: selectedModel })}` : ''}</span>
               </div>
-              <div className="message-content">{streamingMessage}</div>
+              <div className="message-content">{parseMessageWithCodeBlocks(streamingMessage)}</div>
             </div>
           )}
           <div ref={messagesEndRef} />
@@ -3940,12 +4559,12 @@ function ChatPage({ stats }) {
 
   const renderMessageContent = (content) => {
     if (typeof content === 'string') {
-      return content;
+      return parseMessageWithCodeBlocks(content);
     }
     // Multimodal content
     return content.map((part, i) => {
       if (part.type === 'text') {
-        return <span key={i}>{part.text}</span>;
+        return <span key={i}>{parseMessageWithCodeBlocks(part.text)}</span>;
       }
       if (part.type === 'image_url') {
         return <img key={i} src={part.image_url.url} alt="User uploaded" className="message-image" />;
@@ -3998,19 +4617,17 @@ function ChatPage({ stats }) {
           {activeConversation ? (
             <>
               <div className="chat-header">
-                <select
+                <SearchableSelect
                   value={activeConversation.model}
-                  onChange={(e) => updateConversation(activeConversation.id, { model: e.target.value })}
+                  onChange={(val) => updateConversation(activeConversation.id, { model: val })}
+                  options={models.length === 0 ? [] : models.map(m => ({
+                    value: m.id,
+                    label: formatModelName(m)
+                  }))}
+                  placeholder={models.length === 0 ? "No models available" : "Select model..."}
                   disabled={!isHealthy || models.length === 0}
-                >
-                  {models.length === 0 ? (
-                    <option value="">No models available</option>
-                  ) : (
-                    models.map(m => (
-                      <option key={m.id} value={m.id}>{m.id}</option>
-                    ))
-                  )}
-                </select>
+                  storageKey="chatModel"
+                />
                 <button className="btn-ghost btn-small" onClick={clearChat} title="Clear chat">
                   Clear
                 </button>
@@ -4027,16 +4644,11 @@ function ChatPage({ stats }) {
                   <div
                     key={msg.id}
                     className={`chat-message ${msg.role}`}
-                    onMouseMove={(e) => {
-                      if (msg.stats) {
-                        setHoveredMessage(msg.id);
-                        setTooltipPos({ x: e.clientX + 10, y: e.clientY + 10 });
-                      }
-                    }}
-                    onMouseLeave={() => setHoveredMessage(null)}
                   >
                     <div className="message-header">
-                      <span className="message-role">{msg.role === 'user' ? 'You' : 'AI'}</span>
+                      <span className="message-role">
+                        {msg.role === 'user' ? 'You' : `AI${msg.stats?.model ? ` - ${formatModelName({ id: msg.stats.model })}` : ''}`}
+                      </span>
                       <div className="message-actions">
                         <button
                           className={`btn-icon ${copiedId === msg.id ? 'copied' : ''}`}
@@ -4051,27 +4663,9 @@ function ChatPage({ stats }) {
                       </div>
                     </div>
                     <div className="message-content">{renderMessageContent(msg.content)}</div>
-                    {msg.role === 'assistant' && msg.stats && hoveredMessage === msg.id && (
-                      <div
-                        className="message-stats-tooltip"
-                        style={{ left: tooltipPos.x, top: tooltipPos.y }}
-                      >
-                        <div className="stats-tooltip-row">
-                          <span className="stats-label">Model:</span>
-                          <span className="stats-value">{msg.stats.model}</span>
-                        </div>
-                        <div className="stats-tooltip-row">
-                          <span className="stats-label">Speed:</span>
-                          <span className="stats-value">{msg.stats.tokensPerSecond} tok/s</span>
-                        </div>
-                        <div className="stats-tooltip-row">
-                          <span className="stats-label">Tokens:</span>
-                          <span className="stats-value">{msg.stats.completionTokens}</span>
-                        </div>
-                        <div className="stats-tooltip-row">
-                          <span className="stats-label">Duration:</span>
-                          <span className="stats-value">{(msg.stats.duration / 1000).toFixed(2)}s</span>
-                        </div>
+                    {msg.role === 'assistant' && msg.stats && (
+                      <div className="message-stats-inline">
+                        {msg.stats.tokensPerSecond} tok/s · {msg.stats.completionTokens} tokens · {(msg.stats.duration / 1000).toFixed(2)}s
                       </div>
                     )}
                   </div>
@@ -4079,9 +4673,9 @@ function ChatPage({ stats }) {
                 {streamingMessage && (
                   <div className="chat-message assistant streaming">
                     <div className="message-header">
-                      <span className="message-role">AI</span>
+                      <span className="message-role">AI{activeConversation.model ? ` - ${formatModelName({ id: activeConversation.model })}` : ''}</span>
                     </div>
-                    <div className="message-content">{streamingMessage}</div>
+                    <div className="message-content">{parseMessageWithCodeBlocks(streamingMessage)}</div>
                   </div>
                 )}
                 <div ref={messagesEndRef} />
