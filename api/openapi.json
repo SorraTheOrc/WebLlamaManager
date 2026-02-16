@@ -491,6 +491,203 @@
           }
         }
       }
+    },
+    "/api/v1/models/{model}": {
+      "get": {
+        "operationId": "getModel",
+        "summary": "Retrieve model",
+        "description": "Retrieve details for a single model by ID, including GGUF metadata and runtime context size.",
+        "tags": ["OpenAI API"],
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "string"},
+            "description": "The model ID to retrieve"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Model details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {"type": "string"},
+                    "object": {"type": "string", "example": "model"},
+                    "created": {"type": "integer"},
+                    "owned_by": {"type": "string"},
+                    "meta": {"type": "object", "nullable": true, "description": "GGUF model metadata"},
+                    "n_ctx": {"type": "integer", "nullable": true, "description": "Runtime context size"},
+                    "displayName": {"type": "string"},
+                    "status": {"type": "string"},
+                    "alias": {"type": "string", "nullable": true}
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Model not found"
+          }
+        }
+      }
+    },
+    "/api/v1/responses": {
+      "post": {
+        "operationId": "createResponse",
+        "summary": "Create response",
+        "description": "OpenAI Responses API. Supports streaming and tool calling. Proxied to llama.cpp which converts to chat completions internally.",
+        "tags": ["OpenAI API"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model", "input"],
+                "properties": {
+                  "model": {"type": "string", "description": "Model ID to use"},
+                  "input": {"description": "Input text or message array"},
+                  "stream": {"type": "boolean", "default": false},
+                  "temperature": {"type": "number"},
+                  "max_output_tokens": {"type": "integer"},
+                  "tools": {"type": "array", "items": {"type": "object"}},
+                  "instructions": {"type": "string", "description": "System instructions"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Response object or SSE stream"
+          }
+        }
+      }
+    },
+    "/api/v1/messages": {
+      "post": {
+        "operationId": "createMessage",
+        "summary": "Create message (Anthropic)",
+        "description": "Anthropic Messages API compatibility. Supports streaming. Proxied to llama.cpp which converts to chat completions internally.",
+        "tags": ["Anthropic API"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model", "messages", "max_tokens"],
+                "properties": {
+                  "model": {"type": "string"},
+                  "messages": {"type": "array", "items": {"type": "object"}},
+                  "max_tokens": {"type": "integer"},
+                  "stream": {"type": "boolean", "default": false},
+                  "temperature": {"type": "number"},
+                  "system": {"type": "string", "description": "System prompt"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Message response or SSE stream"
+          }
+        }
+      }
+    },
+    "/api/v1/messages/count_tokens": {
+      "post": {
+        "operationId": "countTokens",
+        "summary": "Count tokens (Anthropic)",
+        "description": "Count tokens for a messages request without generating a response.",
+        "tags": ["Anthropic API"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model", "messages"],
+                "properties": {
+                  "model": {"type": "string"},
+                  "messages": {"type": "array", "items": {"type": "object"}},
+                  "system": {"type": "string"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Token count result"
+          }
+        }
+      }
+    },
+    "/api/v1/rerank": {
+      "post": {
+        "operationId": "rerank",
+        "summary": "Rerank documents",
+        "description": "Rerank documents by relevance to a query. Requires a reranking model to be loaded.",
+        "tags": ["OpenAI API"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model", "query", "documents"],
+                "properties": {
+                  "model": {"type": "string"},
+                  "query": {"type": "string", "description": "The search query"},
+                  "documents": {"type": "array", "items": {"type": "string"}, "description": "Documents to rerank"},
+                  "top_n": {"type": "integer", "description": "Number of top results to return"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reranked results"
+          }
+        }
+      }
+    },
+    "/api/v1/reranking": {
+      "post": {
+        "operationId": "reranking",
+        "summary": "Rerank documents (alias)",
+        "description": "Alias for /api/v1/rerank.",
+        "tags": ["OpenAI API"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model", "query", "documents"],
+                "properties": {
+                  "model": {"type": "string"},
+                  "query": {"type": "string"},
+                  "documents": {"type": "array", "items": {"type": "string"}},
+                  "top_n": {"type": "integer"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reranked results"
+          }
+        }
+      }
     }
   },
   "components": {

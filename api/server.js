@@ -2535,6 +2535,310 @@ app.post('/api/v1/embeddings', async (req, res) => {
   }
 });
 
+// OpenAI-compatible single model retrieval
+app.get('/api/v1/models/:model', async (req, res) => {
+  try {
+    const response = await fetch(`http://localhost:${LLAMA_PORT}/models`);
+    if (!response.ok) {
+      throw new Error(`llama.cpp returned ${response.status}`);
+    }
+    const llamaModels = await response.json();
+    const aliases = config.modelAliases || {};
+    const modelId = req.params.model;
+
+    const m = (llamaModels.data || []).find(m => m.id === modelId);
+    if (!m) {
+      return res.status(404).json({ error: { message: `Model '${modelId}' not found`, type: 'invalid_request_error', code: 'model_not_found' } });
+    }
+
+    const args = m.status?.args || [];
+    const ctxIndex = args.indexOf('--ctx-size');
+    const n_ctx = ctxIndex >= 0 ? parseInt(args[ctxIndex + 1]) : null;
+
+    res.json({
+      id: m.id,
+      object: 'model',
+      created: m.created || Math.floor(Date.now() / 1000),
+      owned_by: m.owned_by || 'llamacpp',
+      meta: m.meta || null,
+      n_ctx: n_ctx || config.contextSize || null,
+      displayName: m.id,
+      status: m.status?.value || 'unknown',
+      alias: aliases[m.id] || null
+    });
+  } catch (error) {
+    console.error('[v1/models/:model] Error:', error.message);
+    res.status(502).json({ error: 'Failed to reach llama server', details: error.message });
+  }
+});
+
+// OpenAI Responses API (proxied to llama.cpp)
+app.post('/api/v1/responses', async (req, res) => {
+  const startTime = Date.now();
+  const isStreaming = req.body.stream === true;
+  const requestedModel = req.body.model || 'default';
+
+  console.log(`[responses] Request for model: ${requestedModel}`);
+
+  try {
+    const response = await fetch(`http://localhost:${LLAMA_PORT}/v1/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      console.error(`[responses] Error ${response.status} for model ${requestedModel}: ${error}`);
+      addLog('responses', `Responses API failed for model ${requestedModel}: ${error}`);
+      return res.status(response.status).send(error);
+    }
+
+    if (isStreaming) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let completionTokens = 0;
+      let promptTokens = 0;
+      let model = requestedModel;
+
+      const processStream = async () => {
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value);
+            res.write(chunk);
+
+            // Parse SSE data to count tokens
+            const lines = chunk.split('\n');
+            for (const line of lines) {
+              if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  if (data.usage) {
+                    promptTokens = data.usage.input_tokens || data.usage.prompt_tokens || promptTokens;
+                    completionTokens = data.usage.output_tokens || data.usage.completion_tokens || completionTokens;
+                  }
+                  if (data.model) {
+                    model = data.model;
+                  }
+                } catch (e) {
+                  // Skip parse errors
+                }
+              }
+            }
+          }
+          res.end();
+
+          const duration = Date.now() - startTime;
+          const tokensPerSecond = duration > 0 ? (completionTokens / (duration / 1000)) : 0;
+          recordTokenStats({ promptTokens, completionTokens, tokensPerSecond, model, duration });
+        } catch (e) {
+          console.error('[responses] Stream error:', e);
+          res.end();
+        }
+      };
+
+      processStream();
+    } else {
+      const data = await response.json();
+      const duration = Date.now() - startTime;
+      const usage = data.usage || {};
+      const promptTokens = usage.input_tokens || usage.prompt_tokens || 0;
+      const completionTokens = usage.output_tokens || usage.completion_tokens || 0;
+      const tokensPerSecond = duration > 0 ? (completionTokens / (duration / 1000)) : 0;
+
+      recordTokenStats({
+        promptTokens,
+        completionTokens,
+        tokensPerSecond,
+        model: data.model || requestedModel,
+        duration
+      });
+
+      data._llama_manager = {
+        duration,
+        tokensPerSecond: Math.round(tokensPerSecond * 10) / 10
+      };
+
+      res.json(data);
+    }
+  } catch (error) {
+    res.status(502).json({ error: 'Failed to reach llama server', details: error.message });
+  }
+});
+
+// Anthropic Messages API compatibility (proxied to llama.cpp)
+app.post('/api/v1/messages', async (req, res) => {
+  const startTime = Date.now();
+  const isStreaming = req.body.stream === true;
+  const requestedModel = req.body.model || 'default';
+
+  console.log(`[messages] Request for model: ${requestedModel}`);
+
+  try {
+    const response = await fetch(`http://localhost:${LLAMA_PORT}/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      console.error(`[messages] Error ${response.status} for model ${requestedModel}: ${error}`);
+      addLog('messages', `Messages API failed for model ${requestedModel}: ${error}`);
+      return res.status(response.status).send(error);
+    }
+
+    if (isStreaming) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let model = requestedModel;
+
+      const processStream = async () => {
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value);
+            res.write(chunk);
+
+            const lines = chunk.split('\n');
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  if (data.usage) {
+                    inputTokens = data.usage.input_tokens || inputTokens;
+                    outputTokens = data.usage.output_tokens || outputTokens;
+                  }
+                  if (data.message?.usage) {
+                    inputTokens = data.message.usage.input_tokens || inputTokens;
+                  }
+                  if (data.model) {
+                    model = data.model;
+                  }
+                } catch (e) {
+                  // Skip parse errors
+                }
+              }
+            }
+          }
+          res.end();
+
+          const duration = Date.now() - startTime;
+          const tokensPerSecond = duration > 0 ? (outputTokens / (duration / 1000)) : 0;
+          recordTokenStats({ promptTokens: inputTokens, completionTokens: outputTokens, tokensPerSecond, model, duration });
+        } catch (e) {
+          console.error('[messages] Stream error:', e);
+          res.end();
+        }
+      };
+
+      processStream();
+    } else {
+      const data = await response.json();
+      const duration = Date.now() - startTime;
+      const usage = data.usage || {};
+      const inputTokens = usage.input_tokens || 0;
+      const outputTokens = usage.output_tokens || 0;
+      const tokensPerSecond = duration > 0 ? (outputTokens / (duration / 1000)) : 0;
+
+      recordTokenStats({
+        promptTokens: inputTokens,
+        completionTokens: outputTokens,
+        tokensPerSecond,
+        model: data.model || requestedModel,
+        duration
+      });
+
+      data._llama_manager = {
+        duration,
+        tokensPerSecond: Math.round(tokensPerSecond * 10) / 10
+      };
+
+      res.json(data);
+    }
+  } catch (error) {
+    res.status(502).json({ error: 'Failed to reach llama server', details: error.message });
+  }
+});
+
+// Anthropic Messages token counting (proxied to llama.cpp)
+app.post('/api/v1/messages/count_tokens', async (req, res) => {
+  try {
+    const response = await fetch(`http://localhost:${LLAMA_PORT}/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      return res.status(response.status).send(error);
+    }
+
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    res.status(502).json({ error: 'Failed to reach llama server', details: error.message });
+  }
+});
+
+// OpenAI-compatible reranking endpoint
+app.post('/api/v1/rerank', async (req, res) => {
+  try {
+    const response = await fetch(`http://localhost:${LLAMA_PORT}/v1/rerank`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      return res.status(response.status).send(error);
+    }
+
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    res.status(502).json({ error: 'Failed to reach llama server', details: error.message });
+  }
+});
+
+// Reranking alias
+app.post('/api/v1/reranking', async (req, res) => {
+  try {
+    const response = await fetch(`http://localhost:${LLAMA_PORT}/v1/reranking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      return res.status(response.status).send(error);
+    }
+
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    res.status(502).json({ error: 'Failed to reach llama server', details: error.message });
+  }
+});
+
 // Catch-all for SPA routing
 app.get('*', (req, res) => {
   if (existsSync(join(UI_BUILD_PATH, 'index.html'))) {
