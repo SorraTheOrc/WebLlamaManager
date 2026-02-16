@@ -266,10 +266,14 @@ function SearchableSelect({
 function useWebSocket() {
   const [stats, setStats] = useState(null);
   const [logs, setLogs] = useState([]);
+  const [requestLogs, setRequestLogs] = useState([]);
+  const [llmLogs, setLlmLogs] = useState([]);
   const [connected, setConnected] = useState(false);
   const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
   const MAX_LOGS = 500;
+  const MAX_REQUEST_LOGS = 200;
+  const MAX_LLM_LOGS = 50;
 
   const connect = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -301,6 +305,16 @@ function useWebSocket() {
               const newLogs = [...prev, logData];
               return newLogs.slice(-MAX_LOGS);
             });
+          } else if (message.type === 'requestLog') {
+            setRequestLogs(prev => {
+              const newLogs = [...prev, message.data];
+              return newLogs.slice(-MAX_REQUEST_LOGS);
+            });
+          } else if (message.type === 'llmLog') {
+            setLlmLogs(prev => {
+              const newLogs = [...prev, message.data];
+              return newLogs.slice(-MAX_LLM_LOGS);
+            });
           }
         } catch (e) {
           console.error('[ws] Parse error:', e);
@@ -331,8 +345,10 @@ function useWebSocket() {
   }, [connect]);
 
   const clearLogs = useCallback(() => setLogs([]), []);
+  const clearRequestLogs = useCallback(() => setRequestLogs([]), []);
+  const clearLlmLogs = useCallback(() => setLlmLogs([]), []);
 
-  return { stats, logs, connected, clearLogs };
+  return { stats, logs, connected, clearLogs, requestLogs, clearRequestLogs, llmLogs, clearLlmLogs };
 }
 
 // Sidebar Navigation
@@ -1902,12 +1918,13 @@ function DownloadPage({ stats }) {
 }
 
 // Logs Page
-function LogsPage({ logs, clearLogs }) {
+function LogsPage({ logs, clearLogs, requestLogs, clearRequestLogs, llmLogs, clearLlmLogs }) {
   const [filter, setFilter] = useState('');
   const [autoScroll, setAutoScroll] = useState(true);
   const [showFiltersPanel, setShowFiltersPanel] = useState(false);
   const [logFilters, setLogFilters] = useState({ defaultFilters: [], customFilters: [] });
   const [newFilterPattern, setNewFilterPattern] = useState('');
+  const [activeTab, setActiveTab] = useState('server');
   const logsEndRef = useRef(null);
   const logsContainerRef = useRef(null);
 
@@ -1926,6 +1943,103 @@ function LogsPage({ logs, clearLogs }) {
     fetchInitialLogs();
     fetchFilters();
   }, []);
+
+  // Fetch historical request logs on first tab switch
+  const [fetchedRequestLogs, setFetchedRequestLogs] = useState([]);
+  const [requestLogsLoaded, setRequestLogsLoaded] = useState(false);
+  useEffect(() => {
+    if (activeTab !== 'requests' || requestLogsLoaded) return;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/request-logs?limit=200`);
+        const data = await res.json();
+        if (data.logs?.length) setFetchedRequestLogs(data.logs);
+        setRequestLogsLoaded(true);
+      } catch (err) {
+        console.error('Failed to fetch request logs:', err);
+      }
+    })();
+  }, [activeTab, requestLogsLoaded]);
+
+  // Merge fetched + WS request logs, deduplicated by id
+  const allRequestLogs = React.useMemo(() => {
+    const wsIds = new Set(requestLogs.map(l => l.id));
+    const historical = fetchedRequestLogs.filter(l => !wsIds.has(l.id));
+    return [...historical, ...requestLogs].slice(-200);
+  }, [fetchedRequestLogs, requestLogs]);
+
+  const handleClearRequestLogs = async () => {
+    clearRequestLogs();
+    setFetchedRequestLogs([]);
+    try {
+      await fetch(`${API_BASE}/request-logs`, { method: 'DELETE' });
+    } catch (err) {
+      console.error('Failed to clear request logs:', err);
+    }
+  };
+
+  // Fetch historical LLM logs on first tab switch
+  const [fetchedLlmLogs, setFetchedLlmLogs] = useState([]);
+  const [llmLogsLoaded, setLlmLogsLoaded] = useState(false);
+  const [expandedLlmLogs, setExpandedLlmLogs] = useState(new Set());
+  const [expandedSystemMsgs, setExpandedSystemMsgs] = useState(new Set());
+  useEffect(() => {
+    if (activeTab !== 'llm' || llmLogsLoaded) return;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/llm-logs?limit=50`);
+        const data = await res.json();
+        if (data.logs?.length) setFetchedLlmLogs(data.logs);
+        setLlmLogsLoaded(true);
+      } catch (err) {
+        console.error('Failed to fetch LLM logs:', err);
+      }
+    })();
+  }, [activeTab, llmLogsLoaded]);
+
+  const allLlmLogs = React.useMemo(() => {
+    const wsIds = new Set(llmLogs.map(l => l.id));
+    const historical = fetchedLlmLogs.filter(l => !wsIds.has(l.id));
+    return [...historical, ...llmLogs].slice(-50);
+  }, [fetchedLlmLogs, llmLogs]);
+
+  const handleClearLlmLogs = async () => {
+    clearLlmLogs();
+    setFetchedLlmLogs([]);
+    setExpandedLlmLogs(new Set());
+    try {
+      await fetch(`${API_BASE}/llm-logs`, { method: 'DELETE' });
+    } catch (err) {
+      console.error('Failed to clear LLM logs:', err);
+    }
+  };
+
+  const toggleLlmLogExpand = (id) => {
+    setExpandedLlmLogs(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSystemMsg = (key) => {
+    setExpandedSystemMsgs(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  const filteredLlmLogs = filter
+    ? allLlmLogs.filter(log =>
+        (log.model || '').toLowerCase().includes(filter.toLowerCase()) ||
+        (log.response || '').toLowerCase().includes(filter.toLowerCase()) ||
+        (log.messages || []).some(m =>
+          (typeof m.content === 'string' ? m.content : '').toLowerCase().includes(filter.toLowerCase())
+        ) ||
+        (log.prompt || '').toLowerCase().includes(filter.toLowerCase())
+      )
+    : allLlmLogs;
 
   const fetchFilters = async () => {
     try {
@@ -2003,10 +2117,45 @@ function LogsPage({ logs, clearLogs }) {
     return date.toLocaleTimeString('en-US', { hour12: false });
   };
 
+  const filteredRequestLogs = filter
+    ? allRequestLogs.filter(log =>
+        (log.path || '').toLowerCase().includes(filter.toLowerCase()) ||
+        (log.method || '').toLowerCase().includes(filter.toLowerCase()) ||
+        (log.model || '').toLowerCase().includes(filter.toLowerCase())
+      )
+    : allRequestLogs;
+
+  const getStatusClass = (status) => {
+    if (status >= 500) return 'status-5xx';
+    if (status >= 400) return 'status-4xx';
+    if (status >= 200 && status < 300) return 'status-2xx';
+    return '';
+  };
+
   return (
     <div className="page logs-page">
       <div className="page-header">
-        <h2>Server Logs</h2>
+        <h2>Logs</h2>
+        <div className="logs-tabs">
+          <button
+            className={`tab-btn ${activeTab === 'server' ? 'active' : ''}`}
+            onClick={() => setActiveTab('server')}
+          >
+            Server Logs
+          </button>
+          <button
+            className={`tab-btn ${activeTab === 'requests' ? 'active' : ''}`}
+            onClick={() => setActiveTab('requests')}
+          >
+            Request Logs
+          </button>
+          <button
+            className={`tab-btn ${activeTab === 'llm' ? 'active' : ''}`}
+            onClick={() => setActiveTab('llm')}
+          >
+            LLM Log
+          </button>
+        </div>
         <div className="logs-actions">
           <input
             type="text"
@@ -2015,16 +2164,28 @@ function LogsPage({ logs, clearLogs }) {
             onChange={(e) => setFilter(e.target.value)}
             className="logs-filter"
           />
-          <button className="btn-secondary" onClick={clearLogs}>
-            Clear
-          </button>
-          <button
-            className={`btn-secondary ${showFiltersPanel ? 'active' : ''}`}
-            onClick={() => setShowFiltersPanel(!showFiltersPanel)}
-            title="Manage server-side log filters"
-          >
-            Filters ({logFilters.customFilters.length})
-          </button>
+          {activeTab === 'server' ? (
+            <>
+              <button className="btn-secondary" onClick={clearLogs}>
+                Clear
+              </button>
+              <button
+                className={`btn-secondary ${showFiltersPanel ? 'active' : ''}`}
+                onClick={() => setShowFiltersPanel(!showFiltersPanel)}
+                title="Manage server-side log filters"
+              >
+                Filters ({logFilters.customFilters.length})
+              </button>
+            </>
+          ) : activeTab === 'requests' ? (
+            <button className="btn-secondary" onClick={handleClearRequestLogs}>
+              Clear
+            </button>
+          ) : (
+            <button className="btn-secondary" onClick={handleClearLlmLogs}>
+              Clear
+            </button>
+          )}
           <label className="auto-scroll-toggle">
             <input
               type="checkbox"
@@ -2036,7 +2197,7 @@ function LogsPage({ logs, clearLogs }) {
         </div>
       </div>
 
-      {showFiltersPanel && (
+      {activeTab === 'server' && showFiltersPanel && (
         <div className="filters-panel">
           <div className="filters-section">
             <h4>Server-side Log Filters</h4>
@@ -2089,37 +2250,179 @@ function LogsPage({ logs, clearLogs }) {
         </div>
       )}
 
-      <div
-        className="logs-container"
-        ref={logsContainerRef}
-        onScroll={handleScroll}
-      >
-        {filteredLogs.length === 0 ? (
-          <div className="logs-empty">
-            <p>No logs yet</p>
-            <p className="hint">Logs will appear here when the server outputs messages</p>
-          </div>
-        ) : (
-          <div className="logs-list">
-            {filteredLogs.map((log, i) => (
-              <div key={log.id || i} className={`log-entry ${log.source}`}>
-                <span className="log-time">{formatTime(log.timestamp)}</span>
-                <span className={`log-source ${log.source}`}>{log.source}</span>
-                <span className="log-message">{log.message}</span>
-                {log.count > 1 && <span className="log-count">×{log.count}</span>}
-                <button
-                  className="btn-mute"
-                  onClick={() => addFilterFromLog(log.message)}
-                  title="Filter this log pattern"
-                >
-                  🔇
-                </button>
-              </div>
-            ))}
-            <div ref={logsEndRef} />
-          </div>
-        )}
-      </div>
+      {activeTab === 'server' ? (
+        <div
+          className="logs-container"
+          ref={logsContainerRef}
+          onScroll={handleScroll}
+        >
+          {filteredLogs.length === 0 ? (
+            <div className="logs-empty">
+              <p>No logs yet</p>
+              <p className="hint">Logs will appear here when the server outputs messages</p>
+            </div>
+          ) : (
+            <div className="logs-list">
+              {filteredLogs.map((log, i) => (
+                <div key={log.id || i} className={`log-entry ${log.source}`}>
+                  <span className="log-time">{formatTime(log.timestamp)}</span>
+                  <span className={`log-source ${log.source}`}>{log.source}</span>
+                  <span className="log-message">{log.message}</span>
+                  {log.count > 1 && <span className="log-count">×{log.count}</span>}
+                  <button
+                    className="btn-mute"
+                    onClick={() => addFilterFromLog(log.message)}
+                    title="Filter this log pattern"
+                  >
+                    🔇
+                  </button>
+                </div>
+              ))}
+              <div ref={logsEndRef} />
+            </div>
+          )}
+        </div>
+      ) : activeTab === 'requests' ? (
+        <div
+          className="logs-container"
+          ref={logsContainerRef}
+          onScroll={handleScroll}
+        >
+          {filteredRequestLogs.length === 0 ? (
+            <div className="logs-empty">
+              <p>No request logs yet</p>
+              <p className="hint">Enable request logging in Settings, then API requests will appear here</p>
+            </div>
+          ) : (
+            <div className="request-logs-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Method</th>
+                    <th>Path</th>
+                    <th>Status</th>
+                    <th>Duration</th>
+                    <th>Model</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredRequestLogs.map((log, i) => (
+                    <tr key={log.id || i} className={getStatusClass(log.status)}>
+                      <td className="log-time">{formatTime(log.timestamp)}</td>
+                      <td className="request-method">{log.method}</td>
+                      <td className="request-path" title={log.path}>{log.path}</td>
+                      <td className={`request-status ${getStatusClass(log.status)}`}>{log.status}</td>
+                      <td className="request-duration">{log.duration}ms</td>
+                      <td className="request-model">{log.model || '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div ref={logsEndRef} />
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="logs-container llm-logs-container">
+          {filteredLlmLogs.length === 0 ? (
+            <div className="logs-empty">
+              <p>No LLM conversation logs yet</p>
+              <p className="hint">Send a request via Chat or any API endpoint to see conversations here</p>
+            </div>
+          ) : (
+            <div className="llm-logs-list">
+              {filteredLlmLogs.map((log) => {
+                const isExpanded = expandedLlmLogs.has(log.id);
+                const isError = log.status >= 400;
+                return (
+                  <div key={log.id} className={`llm-log-card ${isError ? 'error' : ''}`}>
+                    <div className="llm-log-summary" onClick={() => toggleLlmLogExpand(log.id)}>
+                      <span className="llm-log-expand">{isExpanded ? '\u25BC' : '\u25B6'}</span>
+                      <span className="log-time">{formatTime(log.timestamp)}</span>
+                      <span className="llm-log-model">{log.model}</span>
+                      <span className="llm-log-tokens">
+                        {log.promptTokens} &rarr; {log.completionTokens}
+                      </span>
+                      <span className="llm-log-duration">{log.duration}ms</span>
+                      {log.tokensPerSecond > 0 && (
+                        <span className="llm-log-tps">{log.tokensPerSecond} t/s</span>
+                      )}
+                      <span className={`llm-log-endpoint ${log.endpoint}`}>{log.endpoint}</span>
+                      {log.stream && <span className="llm-log-badge stream">stream</span>}
+                      {isError && <span className="llm-log-badge error">{log.status}</span>}
+                    </div>
+                    {isExpanded && (
+                      <div className="llm-log-detail">
+                        {log.messages && log.messages.length > 0 && (
+                          <div className="llm-log-messages">
+                            <div className="llm-log-section-title">Messages</div>
+                            {log.messages.map((msg, mi) => {
+                              const role = msg.role || 'unknown';
+                              const content = typeof msg.content === 'string'
+                                ? msg.content
+                                : Array.isArray(msg.content)
+                                  ? msg.content.map(c => c.text || c.content || '').join('')
+                                  : JSON.stringify(msg.content);
+                              const isSystem = role === 'system';
+                              const msgKey = `${log.id}-${mi}`;
+                              const isSystemExpanded = expandedSystemMsgs.has(msgKey);
+                              return (
+                                <div key={mi} className={`llm-msg llm-msg-${role}`}>
+                                  <span className={`llm-msg-role ${role}`}>{role}</span>
+                                  {isSystem ? (
+                                    <div className="llm-msg-content system">
+                                      <div
+                                        className="llm-msg-system-toggle"
+                                        onClick={(e) => { e.stopPropagation(); toggleSystemMsg(msgKey); }}
+                                      >
+                                        {isSystemExpanded ? '\u25BC' : '\u25B6'} System message ({content.length} chars)
+                                      </div>
+                                      {isSystemExpanded && (
+                                        <div className="llm-msg-text">{content}</div>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <div className="llm-msg-content">
+                                      <div className="llm-msg-text">{parseMessageWithCodeBlocks(content)}</div>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                        {log.prompt && (
+                          <div className="llm-log-prompt-section">
+                            <div className="llm-log-section-title">Prompt</div>
+                            <div className="llm-log-prompt-content">
+                              <CodeBlock code={log.prompt} language="" />
+                            </div>
+                          </div>
+                        )}
+                        {log.response && (
+                          <div className="llm-log-response-section">
+                            <div className="llm-log-section-title">Response</div>
+                            <div className="llm-log-response-content">
+                              {parseMessageWithCodeBlocks(log.response)}
+                            </div>
+                          </div>
+                        )}
+                        {log.error && (
+                          <div className="llm-log-error-section">
+                            <div className="llm-log-section-title">Error</div>
+                            <div className="llm-log-error-content">{log.error}</div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -2523,6 +2826,25 @@ function SettingsPage() {
             </label>
             <p className="setting-hint">
               Automatically start the llama server when the manager starts.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section className="page-section">
+        <h3>Logging</h3>
+        <div className="settings-grid">
+          <div className="setting-item checkbox">
+            <label>
+              <input
+                type="checkbox"
+                checked={settings?.requestLogging || false}
+                onChange={(e) => updateSetting('requestLogging', e.target.checked)}
+              />
+              <span>Request Logging</span>
+            </label>
+            <p className="setting-hint">
+              Log HTTP requests with method, path, status, and timing. View in the Logs page under Request Logs tab.
             </p>
           </div>
         </div>
@@ -4744,7 +5066,7 @@ function ChatPage({ stats }) {
 
 // Main App
 function App() {
-  const { stats, logs, connected, clearLogs } = useWebSocket();
+  const { stats, logs, connected, clearLogs, requestLogs, clearRequestLogs, llmLogs, clearLlmLogs } = useWebSocket();
 
   return (
     <BrowserRouter>
@@ -4763,7 +5085,7 @@ function App() {
             <Route path="/presets" element={<PresetsPage stats={stats} />} />
             <Route path="/models" element={<ModelsPage stats={stats} />} />
             <Route path="/download" element={<DownloadPage stats={stats} />} />
-            <Route path="/logs" element={<LogsPage logs={logs} clearLogs={clearLogs} />} />
+            <Route path="/logs" element={<LogsPage logs={logs} clearLogs={clearLogs} requestLogs={requestLogs} clearRequestLogs={clearRequestLogs} llmLogs={llmLogs} clearLlmLogs={clearLlmLogs} />} />
             <Route path="/processes" element={<ProcessesPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/docs" element={<DocsPage />} />

@@ -19,6 +19,55 @@ const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 app.use(cors());
 app.use(express.json());
 
+// Request logging middleware
+const REQUEST_LOG_SKIP_PATHS = new Set(['/ws', '/api/stats', '/api/analytics']);
+const STATIC_EXTENSIONS = /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map)$/;
+
+app.use((req, res, next) => {
+  if (!config.requestLogging) return next();
+
+  const path = req.path;
+  if (REQUEST_LOG_SKIP_PATHS.has(path)) return next();
+  if (!path.startsWith('/api/') && STATIC_EXTENSIONS.test(path)) return next();
+
+  const start = Date.now();
+  let responseSize = 0;
+
+  const origWrite = res.write;
+  const origEnd = res.end;
+
+  res.write = function(chunk, ...args) {
+    if (chunk) responseSize += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length;
+    return origWrite.apply(this, [chunk, ...args]);
+  };
+
+  res.end = function(chunk, ...args) {
+    if (chunk) responseSize += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length;
+    const duration = Date.now() - start;
+
+    const entry = {
+      id: Date.now() + Math.random(),
+      timestamp: new Date().toISOString(),
+      method: req.method,
+      path: req.originalUrl || req.path,
+      status: res.statusCode,
+      duration,
+      requestSize: req.headers['content-length'] ? parseInt(req.headers['content-length']) : 0,
+      responseSize,
+      ip: req.ip || req.connection?.remoteAddress,
+      userAgent: req.headers['user-agent'] || '',
+      model: req.body?.model || null,
+      stream: req.body?.stream || false,
+      error: res.statusCode >= 400 ? res.statusMessage : null
+    };
+
+    addRequestLog(entry);
+    return origEnd.apply(this, [chunk, ...args]);
+  };
+
+  next();
+});
+
 // Serve static files from the UI build
 const UI_BUILD_PATH = join(PROJECT_ROOT, 'ui', 'dist');
 if (existsSync(UI_BUILD_PATH)) {
@@ -133,6 +182,51 @@ function broadcastLog(logEntry) {
   }
 }
 
+// Request log buffer (circular buffer for HTTP request logs)
+const MAX_REQUEST_LOG_ENTRIES = 200;
+let requestLogBuffer = [];
+
+function addRequestLog(entry) {
+  if (!config.requestLogging) return;
+  requestLogBuffer.push(entry);
+  if (requestLogBuffer.length > MAX_REQUEST_LOG_ENTRIES) {
+    requestLogBuffer.shift();
+  }
+  broadcastRequestLog(entry);
+}
+
+function broadcastRequestLog(entry) {
+  const message = JSON.stringify({ type: 'requestLog', data: entry });
+  for (const client of connectedClients) {
+    if (client.readyState === client.OPEN) {
+      client.send(message);
+    }
+  }
+}
+
+// LLM conversation log buffer (stores full conversation context)
+const MAX_LLM_LOG_ENTRIES = 50;
+let llmLogBuffer = [];
+
+function addLlmLog(entry) {
+  entry.id = Date.now() + Math.random();
+  entry.timestamp = new Date().toISOString();
+  llmLogBuffer.push(entry);
+  if (llmLogBuffer.length > MAX_LLM_LOG_ENTRIES) {
+    llmLogBuffer.shift();
+  }
+  broadcastLlmLog(entry);
+}
+
+function broadcastLlmLog(entry) {
+  const message = JSON.stringify({ type: 'llmLog', data: entry });
+  for (const client of connectedClients) {
+    if (client.readyState === client.OPEN) {
+      client.send(message);
+    }
+  }
+}
+
 // Add analytics data point
 function addAnalyticsPoint(category, data) {
   const point = { timestamp: Date.now(), ...data };
@@ -239,7 +333,8 @@ function loadConfig() {
     autoStart: process.env.AUTO_START !== 'false',
     modelsMax: parseInt(process.env.MODELS_MAX) || 2,
     contextSize: parseInt(process.env.CONTEXT_SIZE) || 8192,
-    logFilters: []
+    logFilters: [],
+    requestLogging: false
   };
   saveConfig(defaultConfig);
   return defaultConfig;
@@ -803,7 +898,8 @@ app.get('/api/settings', (req, res) => {
       autoStart: config.autoStart,
       noWarmup: config.noWarmup || false,
       flashAttn: config.flashAttn || false,
-      gpuLayers: config.gpuLayers || 99
+      gpuLayers: config.gpuLayers || 99,
+      requestLogging: config.requestLogging || false
     },
     // Include environment defaults for reference
     defaults: {
@@ -815,7 +911,7 @@ app.get('/api/settings', (req, res) => {
 
 // Update settings
 app.post('/api/settings', (req, res) => {
-  const { contextSize, modelsMax, autoStart, noWarmup, flashAttn, gpuLayers } = req.body;
+  const { contextSize, modelsMax, autoStart, noWarmup, flashAttn, gpuLayers, requestLogging } = req.body;
 
   // Validate and update settings
   if (contextSize !== undefined) {
@@ -855,6 +951,10 @@ app.post('/api/settings', (req, res) => {
     } else {
       return res.status(400).json({ error: 'GPU layers must be between 0 and 999' });
     }
+  }
+
+  if (requestLogging !== undefined) {
+    config.requestLogging = Boolean(requestLogging);
   }
 
   saveConfig(config);
@@ -2049,6 +2149,7 @@ app.get('/api/info', (req, res) => {
       download: 'POST /api/pull',
       processes: 'GET /api/processes',
       logs: 'GET /api/logs',
+      requestLogs: 'GET|DELETE /api/request-logs',
       chatCompletions: 'POST /api/v1/chat/completions',
       completions: 'POST /api/v1/completions'
     }
@@ -2121,6 +2222,32 @@ app.delete('/api/logs/filters', (req, res) => {
   saveConfig(config);
 
   res.json({ success: true, filters: config.logFilters });
+});
+
+// Get request logs
+app.get('/api/request-logs', (req, res) => {
+  const limit = parseInt(req.query.limit) || 50;
+  const logs = requestLogBuffer.slice(-limit);
+  res.json({ logs });
+});
+
+// Clear request logs
+app.delete('/api/request-logs', (req, res) => {
+  requestLogBuffer = [];
+  res.json({ success: true });
+});
+
+// Get LLM conversation logs
+app.get('/api/llm-logs', (req, res) => {
+  const limit = parseInt(req.query.limit) || 50;
+  const logs = llmLogBuffer.slice(-limit);
+  res.json({ logs });
+});
+
+// Clear LLM conversation logs
+app.delete('/api/llm-logs', (req, res) => {
+  llmLogBuffer = [];
+  res.json({ success: true });
 });
 
 // Helper to get container info for a process
@@ -2348,6 +2475,12 @@ app.post('/api/v1/chat/completions', async (req, res) => {
       const error = await response.text();
       console.error(`[chat/completions] Error ${response.status} for model ${requestedModel}: ${error}`);
       addLog('chat', `Chat completion failed for model ${requestedModel}: ${error}`);
+      addLlmLog({
+        endpoint: 'chat/completions', model: requestedModel, stream: isStreaming,
+        status: response.status, duration: Date.now() - startTime,
+        promptTokens: 0, completionTokens: 0, tokensPerSecond: 0,
+        messages: req.body.messages || null, prompt: null, response: null, error
+      });
       return res.status(response.status).send(error);
     }
 
@@ -2362,6 +2495,7 @@ app.post('/api/v1/chat/completions', async (req, res) => {
       let completionTokens = 0;
       let promptTokens = 0;
       let model = req.body.model || 'unknown';
+      let responseText = '';
 
       const processStream = async () => {
         try {
@@ -2380,6 +2514,7 @@ app.post('/api/v1/chat/completions', async (req, res) => {
                   const data = JSON.parse(line.slice(6));
                   if (data.choices?.[0]?.delta?.content) {
                     completionTokens++;
+                    responseText += data.choices[0].delta.content;
                   }
                   if (data.usage) {
                     promptTokens = data.usage.prompt_tokens || promptTokens;
@@ -2405,6 +2540,13 @@ app.post('/api/v1/chat/completions', async (req, res) => {
             tokensPerSecond,
             model,
             duration
+          });
+          addLlmLog({
+            endpoint: 'chat/completions', model, stream: true,
+            status: 200, duration, promptTokens, completionTokens,
+            tokensPerSecond: Math.round(tokensPerSecond * 10) / 10,
+            messages: req.body.messages || null, prompt: null,
+            response: responseText, error: null
           });
         } catch (e) {
           console.error('[proxy] Stream error:', e);
@@ -2432,6 +2574,14 @@ app.post('/api/v1/chat/completions', async (req, res) => {
         duration
       });
 
+      addLlmLog({
+        endpoint: 'chat/completions', model: data.model || req.body.model || 'unknown',
+        stream: false, status: 200, duration, promptTokens, completionTokens,
+        tokensPerSecond: Math.round(tokensPerSecond * 10) / 10,
+        messages: req.body.messages || null, prompt: null,
+        response: data.choices?.[0]?.message?.content || null, error: null
+      });
+
       // Add our tracking info to response
       data._llama_manager = {
         duration,
@@ -2441,6 +2591,13 @@ app.post('/api/v1/chat/completions', async (req, res) => {
       res.json(data);
     }
   } catch (error) {
+    addLlmLog({
+      endpoint: 'chat/completions', model: requestedModel, stream: isStreaming,
+      status: 502, duration: Date.now() - startTime,
+      promptTokens: 0, completionTokens: 0, tokensPerSecond: 0,
+      messages: req.body.messages || null, prompt: null,
+      response: null, error: error.message
+    });
     res.status(502).json({ error: 'Failed to reach llama server', details: error.message });
   }
 });
@@ -2448,6 +2605,8 @@ app.post('/api/v1/chat/completions', async (req, res) => {
 // OpenAI-compatible completions (legacy endpoint)
 app.post('/api/v1/completions', async (req, res) => {
   const startTime = Date.now();
+  const requestedModel = req.body.model || 'unknown';
+  const isStreaming = req.body.stream === true;
 
   try {
     const response = await fetch(`http://localhost:${LLAMA_PORT}/v1/completions`, {
@@ -2458,10 +2617,16 @@ app.post('/api/v1/completions', async (req, res) => {
 
     if (!response.ok) {
       const error = await response.text();
+      addLlmLog({
+        endpoint: 'completions', model: requestedModel, stream: isStreaming,
+        status: response.status, duration: Date.now() - startTime,
+        promptTokens: 0, completionTokens: 0, tokensPerSecond: 0,
+        messages: null, prompt: req.body.prompt || null, response: null, error
+      });
       return res.status(response.status).send(error);
     }
 
-    if (req.body.stream) {
+    if (isStreaming) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
@@ -2469,24 +2634,46 @@ app.post('/api/v1/completions', async (req, res) => {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let tokens = 0;
+      let responseText = '';
 
       const processStream = async () => {
         try {
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            res.write(decoder.decode(value));
+            const chunk = decoder.decode(value);
+            res.write(chunk);
+
+            const lines = chunk.split('\n');
+            for (const line of lines) {
+              if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  if (data.choices?.[0]?.text) {
+                    responseText += data.choices[0].text;
+                  }
+                } catch (e) { /* skip */ }
+              }
+            }
             tokens++;
           }
           res.end();
 
           const duration = Date.now() - startTime;
+          const tokensPerSecond = duration > 0 ? tokens / (duration / 1000) : 0;
           recordTokenStats({
             promptTokens: 0,
             completionTokens: tokens,
-            tokensPerSecond: duration > 0 ? tokens / (duration / 1000) : 0,
-            model: req.body.model || 'unknown',
+            tokensPerSecond,
+            model: requestedModel,
             duration
+          });
+          addLlmLog({
+            endpoint: 'completions', model: requestedModel, stream: true,
+            status: 200, duration, promptTokens: 0, completionTokens: tokens,
+            tokensPerSecond: Math.round(tokensPerSecond * 10) / 10,
+            messages: null, prompt: req.body.prompt || null,
+            response: responseText, error: null
           });
         } catch (e) {
           res.end();
@@ -2498,18 +2685,36 @@ app.post('/api/v1/completions', async (req, res) => {
       const data = await response.json();
       const duration = Date.now() - startTime;
       const usage = data.usage || {};
+      const promptTokens = usage.prompt_tokens || 0;
+      const completionTokens = usage.completion_tokens || 0;
+      const tokensPerSecond = duration > 0 ? (completionTokens / (duration / 1000)) : 0;
 
       recordTokenStats({
-        promptTokens: usage.prompt_tokens || 0,
-        completionTokens: usage.completion_tokens || 0,
-        tokensPerSecond: duration > 0 ? (usage.completion_tokens || 0) / (duration / 1000) : 0,
-        model: data.model || req.body.model || 'unknown',
+        promptTokens,
+        completionTokens,
+        tokensPerSecond,
+        model: data.model || requestedModel,
         duration
+      });
+
+      addLlmLog({
+        endpoint: 'completions', model: data.model || requestedModel,
+        stream: false, status: 200, duration, promptTokens, completionTokens,
+        tokensPerSecond: Math.round(tokensPerSecond * 10) / 10,
+        messages: null, prompt: req.body.prompt || null,
+        response: data.choices?.[0]?.text || null, error: null
       });
 
       res.json(data);
     }
   } catch (error) {
+    addLlmLog({
+      endpoint: 'completions', model: requestedModel, stream: isStreaming,
+      status: 502, duration: Date.now() - startTime,
+      promptTokens: 0, completionTokens: 0, tokensPerSecond: 0,
+      messages: null, prompt: req.body.prompt || null,
+      response: null, error: error.message
+    });
     res.status(502).json({ error: 'Failed to reach llama server', details: error.message });
   }
 });
@@ -2591,6 +2796,13 @@ app.post('/api/v1/responses', async (req, res) => {
       const error = await response.text();
       console.error(`[responses] Error ${response.status} for model ${requestedModel}: ${error}`);
       addLog('responses', `Responses API failed for model ${requestedModel}: ${error}`);
+      addLlmLog({
+        endpoint: 'responses', model: requestedModel, stream: isStreaming,
+        status: response.status, duration: Date.now() - startTime,
+        promptTokens: 0, completionTokens: 0, tokensPerSecond: 0,
+        messages: req.body.input ? (Array.isArray(req.body.input) ? req.body.input : [{ role: 'user', content: req.body.input }]) : null,
+        prompt: null, response: null, error
+      });
       return res.status(response.status).send(error);
     }
 
@@ -2604,6 +2816,7 @@ app.post('/api/v1/responses', async (req, res) => {
       let completionTokens = 0;
       let promptTokens = 0;
       let model = requestedModel;
+      let responseText = '';
 
       const processStream = async () => {
         try {
@@ -2620,6 +2833,9 @@ app.post('/api/v1/responses', async (req, res) => {
               if (line.startsWith('data: ') && line !== 'data: [DONE]') {
                 try {
                   const data = JSON.parse(line.slice(6));
+                  if (data.type === 'response.output_text.delta' && data.delta) {
+                    responseText += data.delta;
+                  }
                   if (data.usage) {
                     promptTokens = data.usage.input_tokens || data.usage.prompt_tokens || promptTokens;
                     completionTokens = data.usage.output_tokens || data.usage.completion_tokens || completionTokens;
@@ -2638,6 +2854,13 @@ app.post('/api/v1/responses', async (req, res) => {
           const duration = Date.now() - startTime;
           const tokensPerSecond = duration > 0 ? (completionTokens / (duration / 1000)) : 0;
           recordTokenStats({ promptTokens, completionTokens, tokensPerSecond, model, duration });
+          addLlmLog({
+            endpoint: 'responses', model, stream: true,
+            status: 200, duration, promptTokens, completionTokens,
+            tokensPerSecond: Math.round(tokensPerSecond * 10) / 10,
+            messages: req.body.input ? (Array.isArray(req.body.input) ? req.body.input : [{ role: 'user', content: req.body.input }]) : null,
+            prompt: null, response: responseText, error: null
+          });
         } catch (e) {
           console.error('[responses] Stream error:', e);
           res.end();
@@ -2661,6 +2884,25 @@ app.post('/api/v1/responses', async (req, res) => {
         duration
       });
 
+      // Extract response text from Responses API output
+      let respText = null;
+      if (data.output) {
+        for (const item of data.output) {
+          if (item.type === 'message' && item.content) {
+            respText = item.content.map(c => c.text || '').join('');
+            break;
+          }
+        }
+      }
+
+      addLlmLog({
+        endpoint: 'responses', model: data.model || requestedModel,
+        stream: false, status: 200, duration, promptTokens, completionTokens,
+        tokensPerSecond: Math.round(tokensPerSecond * 10) / 10,
+        messages: req.body.input ? (Array.isArray(req.body.input) ? req.body.input : [{ role: 'user', content: req.body.input }]) : null,
+        prompt: null, response: respText, error: null
+      });
+
       data._llama_manager = {
         duration,
         tokensPerSecond: Math.round(tokensPerSecond * 10) / 10
@@ -2669,6 +2911,13 @@ app.post('/api/v1/responses', async (req, res) => {
       res.json(data);
     }
   } catch (error) {
+    addLlmLog({
+      endpoint: 'responses', model: requestedModel, stream: isStreaming,
+      status: 502, duration: Date.now() - startTime,
+      promptTokens: 0, completionTokens: 0, tokensPerSecond: 0,
+      messages: req.body.input ? (Array.isArray(req.body.input) ? req.body.input : [{ role: 'user', content: req.body.input }]) : null,
+      prompt: null, response: null, error: error.message
+    });
     res.status(502).json({ error: 'Failed to reach llama server', details: error.message });
   }
 });
@@ -2692,6 +2941,12 @@ app.post('/api/v1/messages', async (req, res) => {
       const error = await response.text();
       console.error(`[messages] Error ${response.status} for model ${requestedModel}: ${error}`);
       addLog('messages', `Messages API failed for model ${requestedModel}: ${error}`);
+      addLlmLog({
+        endpoint: 'messages', model: requestedModel, stream: isStreaming,
+        status: response.status, duration: Date.now() - startTime,
+        promptTokens: 0, completionTokens: 0, tokensPerSecond: 0,
+        messages: req.body.messages || null, prompt: null, response: null, error
+      });
       return res.status(response.status).send(error);
     }
 
@@ -2705,6 +2960,7 @@ app.post('/api/v1/messages', async (req, res) => {
       let inputTokens = 0;
       let outputTokens = 0;
       let model = requestedModel;
+      let responseText = '';
 
       const processStream = async () => {
         try {
@@ -2720,6 +2976,9 @@ app.post('/api/v1/messages', async (req, res) => {
               if (line.startsWith('data: ')) {
                 try {
                   const data = JSON.parse(line.slice(6));
+                  if (data.type === 'content_block_delta' && data.delta?.text) {
+                    responseText += data.delta.text;
+                  }
                   if (data.usage) {
                     inputTokens = data.usage.input_tokens || inputTokens;
                     outputTokens = data.usage.output_tokens || outputTokens;
@@ -2741,6 +3000,13 @@ app.post('/api/v1/messages', async (req, res) => {
           const duration = Date.now() - startTime;
           const tokensPerSecond = duration > 0 ? (outputTokens / (duration / 1000)) : 0;
           recordTokenStats({ promptTokens: inputTokens, completionTokens: outputTokens, tokensPerSecond, model, duration });
+          addLlmLog({
+            endpoint: 'messages', model, stream: true,
+            status: 200, duration, promptTokens: inputTokens, completionTokens: outputTokens,
+            tokensPerSecond: Math.round(tokensPerSecond * 10) / 10,
+            messages: req.body.messages || null, prompt: null,
+            response: responseText, error: null
+          });
         } catch (e) {
           console.error('[messages] Stream error:', e);
           res.end();
@@ -2764,6 +3030,15 @@ app.post('/api/v1/messages', async (req, res) => {
         duration
       });
 
+      addLlmLog({
+        endpoint: 'messages', model: data.model || requestedModel,
+        stream: false, status: 200, duration,
+        promptTokens: inputTokens, completionTokens: outputTokens,
+        tokensPerSecond: Math.round(tokensPerSecond * 10) / 10,
+        messages: req.body.messages || null, prompt: null,
+        response: data.content?.[0]?.text || null, error: null
+      });
+
       data._llama_manager = {
         duration,
         tokensPerSecond: Math.round(tokensPerSecond * 10) / 10
@@ -2772,6 +3047,13 @@ app.post('/api/v1/messages', async (req, res) => {
       res.json(data);
     }
   } catch (error) {
+    addLlmLog({
+      endpoint: 'messages', model: requestedModel, stream: isStreaming,
+      status: 502, duration: Date.now() - startTime,
+      promptTokens: 0, completionTokens: 0, tokensPerSecond: 0,
+      messages: req.body.messages || null, prompt: null,
+      response: null, error: error.message
+    });
     res.status(502).json({ error: 'Failed to reach llama server', details: error.message });
   }
 });
