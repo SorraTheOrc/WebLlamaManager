@@ -2299,16 +2299,27 @@ app.get('/api/v1/models', async (req, res) => {
     // Format with our extra info
     const data = {
       object: 'list',
-      data: (llamaModels.data || []).map(m => ({
-        id: m.id,
-        object: 'model',
-        created: m.created || Math.floor(Date.now() / 1000),
-        owned_by: m.owned_by || 'llamacpp',
-        // Include extra info for UI
-        displayName: m.id, // Use the llama.cpp ID as display name
-        status: m.status?.value || 'unknown',
-        alias: aliases[m.id] || null
-      }))
+      data: (llamaModels.data || []).map(m => {
+        // Extract runtime context size from loaded model's args
+        const args = m.status?.args || [];
+        const ctxIndex = args.indexOf('--ctx-size');
+        const n_ctx = ctxIndex >= 0 ? parseInt(args[ctxIndex + 1]) : null;
+
+        return {
+          id: m.id,
+          object: 'model',
+          created: m.created || Math.floor(Date.now() / 1000),
+          owned_by: m.owned_by || 'llamacpp',
+          // Model metadata from GGUF (includes n_ctx_train, n_params, etc.)
+          meta: m.meta || null,
+          // Runtime context size (configured via --ctx-size)
+          n_ctx: n_ctx || config.contextSize || null,
+          // Include extra info for UI
+          displayName: m.id,
+          status: m.status?.value || 'unknown',
+          alias: aliases[m.id] || null
+        };
+      })
     };
     res.json(data);
   } catch (error) {

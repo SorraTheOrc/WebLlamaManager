@@ -398,11 +398,50 @@
       "get": {
         "operationId": "listModelsOpenAI",
         "summary": "List models (OpenAI)",
-        "description": "OpenAI-compatible endpoint to list available models",
+        "description": "OpenAI-compatible endpoint to list available models. Extends the OpenAI schema with model metadata and context size information from llama.cpp.",
         "tags": ["OpenAI API"],
         "responses": {
           "200": {
-            "description": "Model list"
+            "description": "Model list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {"type": "string", "example": "list"},
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {"type": "string", "description": "Model identifier"},
+                          "object": {"type": "string", "example": "model"},
+                          "created": {"type": "integer", "description": "Unix timestamp"},
+                          "owned_by": {"type": "string", "example": "llamacpp"},
+                          "meta": {
+                            "type": "object",
+                            "nullable": true,
+                            "description": "GGUF model metadata from llama.cpp",
+                            "properties": {
+                              "vocab_type": {"type": "integer"},
+                              "n_vocab": {"type": "integer", "description": "Vocabulary size"},
+                              "n_ctx_train": {"type": "integer", "description": "Training context window size"},
+                              "n_embd": {"type": "integer", "description": "Embedding dimension"},
+                              "n_params": {"type": "integer", "description": "Total parameter count"},
+                              "size": {"type": "integer", "description": "Model file size in bytes"}
+                            }
+                          },
+                          "n_ctx": {"type": "integer", "nullable": true, "description": "Runtime context size (from --ctx-size or server config)"},
+                          "displayName": {"type": "string"},
+                          "status": {"type": "string", "enum": ["loaded", "loading", "available", "unknown"]},
+                          "alias": {"type": "string", "nullable": true, "description": "User-defined model alias"}
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
