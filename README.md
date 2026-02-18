@@ -2,6 +2,8 @@
 
 # Llama Manager
 
+<img width="1500" height="1167" alt="image" src="https://github.com/user-attachments/assets/e57cad3c-8d95-45c3-a504-b984249f90aa" />
+
 A systemd service with web UI for managing llama.cpp in multi-model router mode on AMD GPUs using distrobox.
 
 <br clear="left">
