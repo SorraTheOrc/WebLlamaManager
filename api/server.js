@@ -1459,28 +1459,29 @@ async function restartForPreset(preset) {
       }
     }
     
-    // Update serverConfig with new values
+    // Calculate new values (but don't update serverConfig yet - wait for success)
     // Note: context is stored at preset level, not inside config
     const newContext = preset.context || config.defaultContext || 8192;
     const newGpuLayers = presetConfig.gpuLayers !== undefined ? presetConfig.gpuLayers : (config.gpuLayers || 99);
     const newFlashAttn = presetConfig.flashAttn !== undefined ? presetConfig.flashAttn : (config.flashAttn || false);
     const newReasoningFormat = presetConfig.reasoningFormat || null;
     
-    serverConfig.context = newContext;
-    serverConfig.gpuLayers = newGpuLayers;
-    serverConfig.flashAttn = newFlashAttn;
-    serverConfig.reasoningFormat = newReasoningFormat;
+    // Save old values to restore on failure
+    const oldServerConfig = { ...serverConfig };
+    const oldMode = currentMode;
+    const oldPreset = currentPreset;
     
-    // Build extra switches
-    let extraSwitches = '--jinja';
-    if (newFlashAttn) {
+    // Build extra switches - start with preset's extraSwitches, ensure --jinja is included
+    let extraSwitches = presetConfig.extraSwitches || '--jinja';
+    // Ensure --jinja is always present
+    if (!extraSwitches.includes('--jinja')) {
+      extraSwitches = '--jinja ' + extraSwitches;
+    }
+    if (newFlashAttn && !extraSwitches.includes('--flash-attn')) {
       extraSwitches += ' --flash-attn';
     }
-    if (newReasoningFormat) {
+    if (newReasoningFormat && !extraSwitches.includes('--reasoning-format')) {
       extraSwitches += ` --reasoning-format ${newReasoningFormat}`;
-    }
-    if (presetConfig.extraSwitches) {
-      extraSwitches += ` ${presetConfig.extraSwitches}`;
     }
     
     // Use start-preset.sh with environment variables (same as /api/presets/:presetId/activate)
@@ -1539,8 +1540,18 @@ async function restartForPreset(preset) {
     if (!healthy) {
       console.error('[restartForPreset] Server failed to become healthy');
       addLog('server', 'Server restart failed: health check timeout');
+      // Restore old config values since restart failed
+      Object.assign(serverConfig, oldServerConfig);
+      currentMode = oldMode;
+      currentPreset = oldPreset;
       return { success: false, error: 'Server health check timeout' };
     }
+    
+    // Success! Now commit the new config values
+    serverConfig.context = newContext;
+    serverConfig.gpuLayers = newGpuLayers;
+    serverConfig.flashAttn = newFlashAttn;
+    serverConfig.reasoningFormat = newReasoningFormat;
     
     console.log(`[restartForPreset] Server restarted successfully for preset "${preset.id}"`);
     addLog('server', `Server restarted successfully for preset "${preset.id}"`);
@@ -1550,6 +1561,10 @@ async function restartForPreset(preset) {
   } catch (err) {
     console.error(`[restartForPreset] Error: ${err.message}`);
     addLog('server', `Server restart error: ${err.message}`);
+    // Restore old config values on error
+    Object.assign(serverConfig, oldServerConfig);
+    currentMode = oldMode;
+    currentPreset = oldPreset;
     return { success: false, error: err.message };
     
   } finally {
