@@ -1813,6 +1813,7 @@ function ModelsPage({ stats }) {
   const [loading, setLoading] = useState({});
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [duplicatingPreset, setDuplicatingPreset] = useState(null);
+  const [editingPreset, setEditingPreset] = useState(null);  // Preset being edited
   const [newPreset, setNewPreset] = useState({
     id: '',
     name: '',
@@ -1937,6 +1938,57 @@ function ModelsPage({ stats }) {
     setShowCreateForm(true);
   };
 
+  const startEditingPreset = (preset) => {
+    setEditingPreset(preset);
+    setDuplicatingPreset(null);
+    setNewPreset({
+      id: preset.id,
+      name: preset.name || '',
+      description: preset.description || '',
+      modelPath: preset.modelPath || preset.resolvedPath || '',
+      context: preset.context || 0,
+      config: {
+        temp: preset.config?.temp ?? 0.7,
+        topP: preset.config?.topP ?? 1.0,
+        topK: preset.config?.topK ?? 20,
+        minP: preset.config?.minP ?? 0,
+        chatTemplateKwargs: preset.config?.chatTemplateKwargs || '',
+        extraSwitches: preset.config?.extraSwitches || '--jinja'
+      }
+    });
+    setShowCreateForm(true);
+  };
+
+  const updatePreset = async () => {
+    if (!editingPreset) return;
+    setLoading(l => ({ ...l, update: true }));
+    try {
+      const res = await fetch(`${API_BASE}/presets/${editingPreset.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newPreset.name,
+          description: newPreset.description,
+          modelPath: newPreset.modelPath,
+          context: newPreset.context,
+          config: newPreset.config
+        })
+      });
+      if (res.ok) {
+        await fetchModels();
+        setShowCreateForm(false);
+        setEditingPreset(null);
+        resetNewPreset();
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Failed to update preset');
+      }
+    } catch (err) {
+      console.error('Failed to update preset:', err);
+    }
+    setLoading(l => ({ ...l, update: false }));
+  };
+
   const resetNewPreset = () => {
     setNewPreset({
       id: '', name: '', description: '', modelPath: '', context: 0,
@@ -1966,7 +2018,7 @@ function ModelsPage({ stats }) {
       <div className="page-header">
         <h2>Models</h2>
         <div className="page-header-actions">
-          <button className="btn-primary" onClick={() => { setShowCreateForm(!showCreateForm); if (!showCreateForm) { setDuplicatingPreset(null); resetNewPreset(); } }}>
+          <button className="btn-primary" onClick={() => { setShowCreateForm(!showCreateForm); if (!showCreateForm) { setDuplicatingPreset(null); setEditingPreset(null); resetNewPreset(); } }}>
             {showCreateForm ? 'Cancel' : '+ New Configuration'}
           </button>
         </div>
@@ -1976,10 +2028,10 @@ function ModelsPage({ stats }) {
         Model configurations with specific settings. Use presets as model IDs in your API calls.
       </p>
 
-      {/* Create/Duplicate Preset Form */}
+      {/* Create/Edit/Duplicate Preset Form */}
       {showCreateForm && (
         <div className="create-preset-form">
-          <h3>{duplicatingPreset ? `Duplicate: ${duplicatingPreset.name}` : 'Create Configuration'}</h3>
+          <h3>{editingPreset ? `Edit: ${editingPreset.name}` : duplicatingPreset ? `Duplicate: ${duplicatingPreset.name}` : 'Create Configuration'}</h3>
           <div className="form-grid">
             <div className="form-group">
               <label>Configuration ID (used in API calls)</label>
@@ -1988,7 +2040,10 @@ function ModelsPage({ stats }) {
                 placeholder="my-model-config"
                 value={newPreset.id}
                 onChange={(e) => setNewPreset(p => ({ ...p, id: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-') }))}
+                disabled={!!editingPreset}
+                className={editingPreset ? 'disabled' : ''}
               />
+              {editingPreset && <small className="hint">ID cannot be changed</small>}
             </div>
             <div className="form-group">
               <label>Display Name</label>
@@ -2072,10 +2127,16 @@ function ModelsPage({ stats }) {
             </div>
           </div>
           <div className="form-actions">
-            <button className="btn-secondary" onClick={() => { setShowCreateForm(false); setDuplicatingPreset(null); resetNewPreset(); }}>Cancel</button>
-            <button className="btn-primary" onClick={createPreset} disabled={loading.create}>
-              {loading.create ? 'Creating...' : (duplicatingPreset ? 'Create Copy' : 'Create Configuration')}
-            </button>
+            <button className="btn-secondary" onClick={() => { setShowCreateForm(false); setDuplicatingPreset(null); setEditingPreset(null); resetNewPreset(); }}>Cancel</button>
+            {editingPreset ? (
+              <button className="btn-primary" onClick={updatePreset} disabled={loading.update}>
+                {loading.update ? 'Saving...' : 'Save Changes'}
+              </button>
+            ) : (
+              <button className="btn-primary" onClick={createPreset} disabled={loading.create}>
+                {loading.create ? 'Creating...' : (duplicatingPreset ? 'Create Copy' : 'Create Configuration')}
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -2111,6 +2172,13 @@ function ModelsPage({ stats }) {
                   )}
                 </div>
                 <div className="preset-actions">
+                  <button
+                    className="btn-secondary"
+                    onClick={() => startEditingPreset(model)}
+                    title="Edit configuration settings"
+                  >
+                    Edit
+                  </button>
                   <button
                     className="btn-secondary"
                     onClick={() => duplicatePreset(model)}
@@ -2163,6 +2231,13 @@ function ModelsPage({ stats }) {
                   )}
                 </div>
                 <div className="preset-actions">
+                  <button
+                    className="btn-secondary"
+                    onClick={() => startEditingPreset(model)}
+                    title="Edit configuration settings"
+                  >
+                    Edit
+                  </button>
                   <button
                     className="btn-secondary"
                     onClick={() => duplicatePreset(model)}
