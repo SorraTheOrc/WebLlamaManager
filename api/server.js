@@ -1349,10 +1349,11 @@ function isCompatible(preset) {
   
   const presetConfig = preset.config || {};
   
-  // Context: stored at preset level, not inside config
-  // Preset can use less than or equal to current context
-  if (preset.context && preset.context > serverConfig.context) {
-    reasons.push(`Context ${preset.context} > current ${serverConfig.context}`);
+  // Context: requires server restart to change
+  // If preset specifies a context (non-zero), it must match current context
+  // Context 0 means "use default/current" so it's always compatible
+  if (preset.context && preset.context !== serverConfig.context) {
+    reasons.push(`Context ${preset.context} != current ${serverConfig.context}`);
   }
   
   // GPU layers: must match if specified (affects VRAM allocation)
@@ -1372,6 +1373,9 @@ function isCompatible(preset) {
       presetConfig.reasoningFormat !== serverConfig.reasoningFormat) {
     reasons.push(`Reasoning format "${presetConfig.reasoningFormat}" != current "${serverConfig.reasoningFormat || 'none'}"`);
   }
+  
+  // Note: temperature, top_p, top_k, min_p are NOT checked here
+  // because they can be passed per-request to the llama.cpp API
   
   return {
     compatible: reasons.length === 0,
