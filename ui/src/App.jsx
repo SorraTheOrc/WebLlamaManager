@@ -2152,24 +2152,28 @@ function ModelsPage({ stats }) {
                   <h3>{model.name}</h3>
                   {getStatusBadge(model.status)}
                 </div>
-                <p className="preset-description">{model.description}</p>
+                <p className="preset-description">{model.description || 'No description'}</p>
                 <div className="preset-details">
                   <div className="detail-row">
-                    <span className="detail-label">API ID</span>
+                    <span className="detail-label">ID</span>
                     <span className="detail-value code">{model.id}</span>
                   </div>
-                  {model.resolvedPath && (
-                    <div className="detail-row">
-                      <span className="detail-label">Model</span>
-                      <span className="detail-value">{model.resolvedPath.split('/').pop()}</span>
-                    </div>
-                  )}
-                  {model.context > 0 && (
-                    <div className="detail-row">
-                      <span className="detail-label">Context</span>
-                      <span className="detail-value">{model.context.toLocaleString()}</span>
-                    </div>
-                  )}
+                  <div className="detail-row">
+                    <span className="detail-label">Context</span>
+                    <span className="detail-value">{model.context > 0 ? model.context.toLocaleString() : 'Default'}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Temp</span>
+                    <span className="detail-value">{model.config?.temp ?? 0.7}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Top P</span>
+                    <span className="detail-value">{model.config?.topP ?? 1.0}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Top K</span>
+                    <span className="detail-value">{model.config?.topK ?? 20}</span>
+                  </div>
                 </div>
                 <div className="preset-actions">
                   <button
@@ -2211,24 +2215,28 @@ function ModelsPage({ stats }) {
                   <h3>{model.name}</h3>
                   {getStatusBadge(model.status)}
                 </div>
-                <p className="preset-description">{model.description}</p>
+                <p className="preset-description">{model.description || 'No description'}</p>
                 <div className="preset-details">
                   <div className="detail-row">
-                    <span className="detail-label">API ID</span>
+                    <span className="detail-label">ID</span>
                     <span className="detail-value code">{model.id}</span>
                   </div>
-                  {model.resolvedPath && (
-                    <div className="detail-row">
-                      <span className="detail-label">Model</span>
-                      <span className="detail-value">{model.resolvedPath.split('/').pop()}</span>
-                    </div>
-                  )}
-                  {model.context > 0 && (
-                    <div className="detail-row">
-                      <span className="detail-label">Context</span>
-                      <span className="detail-value">{model.context.toLocaleString()}</span>
-                    </div>
-                  )}
+                  <div className="detail-row">
+                    <span className="detail-label">Context</span>
+                    <span className="detail-value">{model.context > 0 ? model.context.toLocaleString() : 'Default'}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Temp</span>
+                    <span className="detail-value">{model.config?.temp ?? 0.7}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Top P</span>
+                    <span className="detail-value">{model.config?.topP ?? 1.0}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Top K</span>
+                    <span className="detail-value">{model.config?.topK ?? 20}</span>
+                  </div>
                 </div>
                 <div className="preset-actions">
                   <button
@@ -2276,11 +2284,27 @@ function ModelsPage({ stats }) {
                   <h3>{model.name}</h3>
                   {getStatusBadge(model.status)}
                 </div>
-                <p className="preset-description">{model.description}</p>
+                <p className="preset-description">{model.description || 'No description'}</p>
                 <div className="preset-details">
                   <div className="detail-row">
-                    <span className="detail-label">API ID</span>
+                    <span className="detail-label">ID</span>
                     <span className="detail-value code">{model.id}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Context</span>
+                    <span className="detail-value">{model.context > 0 ? model.context.toLocaleString() : 'Default'}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Temp</span>
+                    <span className="detail-value">{model.config?.temp ?? 0.7}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Top P</span>
+                    <span className="detail-value">{model.config?.topP ?? 1.0}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Top K</span>
+                    <span className="detail-value">{model.config?.topK ?? 20}</span>
                   </div>
                   {model.hfRepo && (
                     <div className="detail-row">
