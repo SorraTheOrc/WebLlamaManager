@@ -192,7 +192,7 @@ function SearchableSelect({
   const containerRef = useRef(null);
   const inputRef = useRef(null);
 
-  // Load from localStorage on mount if storageKey provided
+  // Load from localStorage on mount if storageKey provided and no value set
   useEffect(() => {
     if (storageKey && !value) {
       const saved = localStorage.getItem(storageKey);
@@ -200,7 +200,9 @@ function SearchableSelect({
         onChange(saved);
       }
     }
-  }, [storageKey, options]);
+    // Only run on mount, not when value changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storageKey, options.length]);
 
   // Save to localStorage when value changes
   useEffect(() => {
@@ -2074,7 +2076,7 @@ function ModelsPage({ stats }) {
                 onChange={(val) => setNewPreset(p => ({ ...p, modelPath: val }))}
                 options={localModels.map(m => ({ value: m.path, label: formatModelName(m) }))}
                 placeholder="Select a local model..."
-                storageKey="lastPresetModel"
+                storageKey={editingPreset ? null : "lastPresetModel"}
               />
             </div>
             <div className="form-group">
