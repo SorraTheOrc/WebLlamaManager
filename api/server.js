@@ -1805,6 +1805,13 @@ function migrateExistingModels() {
   for (const model of localModels) {
     if (model.incomplete) continue;  // Skip incomplete split models
     
+    // Skip mmproj (multimodal projection) files - these are auxiliary files, not chat models
+    const filename = basename(model.path);
+    if (filename.toLowerCase().startsWith('mmproj-') || filename.toLowerCase().startsWith('mmproj_')) {
+      console.log(`[presets] Skipping mmproj file: ${model.name}`);
+      continue;
+    }
+    
     const preset = autoCreatePreset({
       modelPath: model.path,
       filename: model.name
@@ -2299,6 +2306,18 @@ app.post('/api/presets', (req, res) => {
 app.put('/api/presets/:presetId', (req, res) => {
   const { presetId } = req.params;
   const updates = req.body;
+
+  // Log the update request for debugging
+  const existingPreset = config.presets?.[presetId];
+  if (existingPreset) {
+    console.log(`[presets] PUT ${presetId} - incoming changes:`);
+    if (updates.context !== undefined && updates.context !== existingPreset.context) {
+      console.log(`  context: ${existingPreset.context} -> ${updates.context}`);
+    }
+    if (updates.config?.extraSwitches !== undefined && updates.config?.extraSwitches !== existingPreset.config?.extraSwitches) {
+      console.log(`  extraSwitches: "${existingPreset.config?.extraSwitches}" -> "${updates.config?.extraSwitches}"`);
+    }
+  }
 
   if (!config.presets || !config.presets[presetId]) {
     return res.status(404).json({ error: `Preset '${presetId}' not found` });
