@@ -1662,8 +1662,9 @@ function generatePresetId(input) {
  * @param {string} input - Model filename or HuggingFace repo string
  * @returns {string} - A human-readable name (preserves case, removes extension)
  */
-function extractModelName(input) {
+function extractModelName(input, { includeQuantization = false } = {}) {
   let name = input;
+  let quantSuffix = '';
   
   // Handle HuggingFace repo format
   if (input.includes('/')) {
@@ -1677,9 +1678,16 @@ function extractModelName(input) {
   // Strip .gguf extension
   name = name.replace(/\.gguf$/i, '');
   
-  // Strip quantization suffixes (preserve case)
+  // Strip quantization suffixes (preserve case) but optionally capture them
   for (const pattern of QUANTIZATION_PATTERNS) {
-    name = name.replace(pattern, '');
+    const match = name.match(pattern);
+    if (match) {
+      if (includeQuantization && !quantSuffix) {
+        // Capture the first quantization pattern found (cleaned up)
+        quantSuffix = match[0].replace(/^-/, ' ');
+      }
+      name = name.replace(pattern, '');
+    }
   }
   
   // Strip part numbers
@@ -1690,6 +1698,11 @@ function extractModelName(input) {
   
   // Remove trailing hyphens
   name = name.replace(/-+$/, '');
+  
+  // Append quantization if requested
+  if (includeQuantization && quantSuffix) {
+    name = name + quantSuffix;
+  }
   
   return name;
 }
@@ -1727,12 +1740,14 @@ function createDefaultPreset({ modelPath, hfRepo, filename }) {
   const source = hfRepo || filename || basename(modelPath || '');
   const baseId = generatePresetId(source);
   const id = ensureUniquePresetId(baseId);
-  const name = extractModelName(source);
+  // Include quantization in the display name so users can distinguish variants
+  const name = extractModelName(source, { includeQuantization: true });
+  const baseName = extractModelName(source);  // Without quantization for description
   
   const preset = {
     id,
     name,
-    description: `Auto-generated preset for ${name}`,
+    description: `Auto-generated preset for ${baseName}`,
     modelPath: modelPath || null,
     hfRepo: hfRepo || null,
     context: 0,  // 0 means use server default
