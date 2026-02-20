@@ -1155,40 +1155,33 @@ function resolveModelPath(resolved) {
   if (!resolved) return null;
 
   if (resolved.type === 'file') {
-    return resolved.relativePath;
+    // For file-based resolution, return just the folder name as the model ID
+    // llama.cpp router mode uses folder names as model IDs
+    const relativePath = resolved.relativePath;
+    const folderName = relativePath.split('/')[0];
+    return folderName;
   }
 
   if (resolved.type === 'preset') {
     const preset = resolved.preset;
     
-    // If preset has a direct model path, use it
+    // If preset has a direct model path, extract the folder name for llama.cpp
     if (preset.modelPath) {
-      // Return relative path for llama.cpp router mode
+      let relativePath;
       if (preset.modelPath.startsWith(MODELS_DIR)) {
-        return preset.modelPath.replace(MODELS_DIR + '/', '');
+        relativePath = preset.modelPath.replace(MODELS_DIR + '/', '');
+      } else {
+        relativePath = preset.modelPath;
       }
-      return preset.modelPath;
+      // Return just the folder name as the model ID for llama.cpp router mode
+      const folderName = relativePath.split('/')[0];
+      return folderName;
     }
 
-    // If preset uses hfRepo, construct expected download path
+    // If preset uses hfRepo, return the hfRepo as the model ID
+    // llama.cpp router mode can load directly from HuggingFace
     if (preset.hfRepo) {
-      // hfRepo format: "org/repo:quantization" or "org/repo"
-      const [repoPath, quant] = preset.hfRepo.split(':');
-      const repoDir = repoPath.replace('/', '_');
-      
-      // Scan for matching file in the download directory
-      const downloadDir = join(MODELS_DIR, repoDir);
-      if (existsSync(downloadDir)) {
-        const files = readdirSync(downloadDir).filter(f => f.endsWith('.gguf'));
-        if (quant) {
-          // Find file matching quantization
-          const quantUpper = quant.toUpperCase();
-          const match = files.find(f => f.toUpperCase().includes(quantUpper));
-          if (match) return `${repoDir}/${match}`;
-        }
-        // Return first gguf file found
-        if (files.length > 0) return `${repoDir}/${files[0]}`;
-      }
+      return preset.hfRepo;
     }
 
     return null;
