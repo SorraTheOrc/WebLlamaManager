@@ -1999,10 +1999,13 @@ function ModelsPage({ stats }) {
 
   const isHealthy = stats?.llama?.status === 'ok';
 
-  // Group models by status
-  const loadedModels = models.filter(m => m.status === 'loaded');
-  const availableModels = models.filter(m => m.status === 'available' || m.status === 'loading');
-  const notDownloadedModels = models.filter(m => m.status === 'not_downloaded');
+  // Sort by name alphabetically (case-insensitive)
+  const sortByName = (a, b) => (a.name || a.id).toLowerCase().localeCompare((b.name || b.id).toLowerCase());
+
+  // Group models by status and sort alphabetically
+  const loadedModels = models.filter(m => m.status === 'loaded').sort(sortByName);
+  const availableModels = models.filter(m => m.status === 'available' || m.status === 'loading').sort(sortByName);
+  const notDownloadedModels = models.filter(m => m.status === 'not_downloaded').sort(sortByName);
 
   const getStatusBadge = (status) => {
     switch (status) {
@@ -2160,6 +2163,10 @@ function ModelsPage({ stats }) {
                     <span className="detail-value code">{model.id}</span>
                   </div>
                   <div className="detail-row">
+                    <span className="detail-label">Model</span>
+                    <span className="detail-value">{model.modelPath ? model.modelPath.split('/').pop() : model.resolvedPath?.split('/').pop() || 'Not set'}</span>
+                  </div>
+                  <div className="detail-row">
                     <span className="detail-label">Context</span>
                     <span className="detail-value">{model.context > 0 ? model.context.toLocaleString() : 'Default'}</span>
                   </div>
@@ -2221,6 +2228,10 @@ function ModelsPage({ stats }) {
                   <div className="detail-row">
                     <span className="detail-label">ID</span>
                     <span className="detail-value code">{model.id}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Model</span>
+                    <span className="detail-value">{model.modelPath ? model.modelPath.split('/').pop() : model.resolvedPath?.split('/').pop() || 'Not set'}</span>
                   </div>
                   <div className="detail-row">
                     <span className="detail-label">Context</span>
@@ -2292,6 +2303,10 @@ function ModelsPage({ stats }) {
                     <span className="detail-value code">{model.id}</span>
                   </div>
                   <div className="detail-row">
+                    <span className="detail-label">Model</span>
+                    <span className="detail-value">{model.modelPath ? model.modelPath.split('/').pop() : model.hfRepo || 'Not set'}</span>
+                  </div>
+                  <div className="detail-row">
                     <span className="detail-label">Context</span>
                     <span className="detail-value">{model.context > 0 ? model.context.toLocaleString() : 'Default'}</span>
                   </div>
@@ -2307,12 +2322,6 @@ function ModelsPage({ stats }) {
                     <span className="detail-label">Top K</span>
                     <span className="detail-value">{model.config?.topK ?? 20}</span>
                   </div>
-                  {model.hfRepo && (
-                    <div className="detail-row">
-                      <span className="detail-label">HuggingFace</span>
-                      <span className="detail-value">{model.hfRepo}</span>
-                    </div>
-                  )}
                 </div>
                 <div className="preset-actions">
                   <button
