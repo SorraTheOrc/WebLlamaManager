@@ -537,6 +537,9 @@ function saveConfig(config) {
 
 let config = loadConfig();
 
+// Auto-create presets for any existing models that don't have one
+migrateExistingModels();
+
 // WebSocket stats broadcasting
 const STATS_INTERVAL = parseInt(process.env.STATS_INTERVAL) || 1000; // Default 1 second
 let statsInterval = null;
@@ -1302,6 +1305,250 @@ function prepareProxyRequest(body) {
   }
 
   return { body: modifiedBody, resolved, modelPath };
+}
+
+// ============================================================================
+// Auto-Preset Creation: Generate presets for downloaded models
+// ============================================================================
+
+/**
+ * Common quantization suffixes to strip from model names.
+ * Order matters - longer/more specific patterns first.
+ */
+const QUANTIZATION_PATTERNS = [
+  // IQ patterns (importance quantization)
+  /-IQ\d_[A-Z]+$/i,
+  /-IQ\d[A-Z]+$/i,
+  // Q patterns with size indicators
+  /-Q\d_K_[A-Z]+$/i,
+  /-Q\d_K$/i,
+  /-Q\d_[A-Z]+$/i,
+  /-Q\d[A-Z]+$/i,
+  /-Q\d$/i,
+  // F patterns (float)
+  /-F\d\d$/i,
+  /-F\d$/i,
+  /-FP\d\d$/i,
+  // BF16
+  /-BF16$/i,
+  // Common suffixes
+  /-GGUF$/i,
+  /-gguf$/i,
+];
+
+/**
+ * Generate a human-readable preset ID from a model filename or HuggingFace repo.
+ * 
+ * Examples:
+ * - "Qwen2.5-Coder-32B-Instruct-Q5_K_M.gguf" -> "qwen2.5-coder-32b-instruct"
+ * - "Unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q5_K_M" -> "qwen3-coder-30b-a3b-instruct"
+ * 
+ * @param {string} input - Model filename or HuggingFace repo string
+ * @returns {string} - A clean, lowercase preset ID
+ */
+function generatePresetId(input) {
+  let name = input;
+  
+  // Handle HuggingFace repo format: "org/repo:quant" or "org/repo"
+  if (input.includes('/')) {
+    // Extract repo name (after /)
+    const parts = input.split('/');
+    name = parts[parts.length - 1];
+    // Remove quantization after colon
+    if (name.includes(':')) {
+      name = name.split(':')[0];
+    }
+  }
+  
+  // Strip .gguf extension
+  name = name.replace(/\.gguf$/i, '');
+  
+  // Strip quantization suffixes
+  for (const pattern of QUANTIZATION_PATTERNS) {
+    name = name.replace(pattern, '');
+  }
+  
+  // Strip trailing numbers that might be part numbers (e.g., "-00001-of-00004")
+  name = name.replace(/-\d{5}-of-\d{5}$/i, '');
+  
+  // Convert to lowercase
+  name = name.toLowerCase();
+  
+  // Replace underscores and spaces with hyphens
+  name = name.replace(/[_\s]+/g, '-');
+  
+  // Remove any double hyphens
+  name = name.replace(/--+/g, '-');
+  
+  // Remove trailing hyphens
+  name = name.replace(/-+$/, '');
+  
+  return name;
+}
+
+/**
+ * Extract a human-readable display name from a model filename or repo.
+ * 
+ * @param {string} input - Model filename or HuggingFace repo string
+ * @returns {string} - A human-readable name (preserves case, removes extension)
+ */
+function extractModelName(input) {
+  let name = input;
+  
+  // Handle HuggingFace repo format
+  if (input.includes('/')) {
+    const parts = input.split('/');
+    name = parts[parts.length - 1];
+    if (name.includes(':')) {
+      name = name.split(':')[0];
+    }
+  }
+  
+  // Strip .gguf extension
+  name = name.replace(/\.gguf$/i, '');
+  
+  // Strip quantization suffixes (preserve case)
+  for (const pattern of QUANTIZATION_PATTERNS) {
+    name = name.replace(pattern, '');
+  }
+  
+  // Strip part numbers
+  name = name.replace(/-\d{5}-of-\d{5}$/i, '');
+  
+  // Replace underscores with spaces for readability
+  name = name.replace(/_/g, ' ');
+  
+  // Remove trailing hyphens
+  name = name.replace(/-+$/, '');
+  
+  return name;
+}
+
+/**
+ * Ensure a preset ID is unique by appending a numeric suffix if needed.
+ * 
+ * @param {string} baseId - The base preset ID
+ * @returns {string} - A unique preset ID
+ */
+function ensureUniquePresetId(baseId) {
+  if (!config.presets || !config.presets[baseId]) {
+    return baseId;
+  }
+  
+  // Find the next available suffix
+  let suffix = 2;
+  while (config.presets[`${baseId}-${suffix}`]) {
+    suffix++;
+  }
+  
+  return `${baseId}-${suffix}`;
+}
+
+/**
+ * Create a default preset for a model.
+ * 
+ * @param {object} options - Configuration options
+ * @param {string} options.modelPath - Full path to the model file (optional)
+ * @param {string} options.hfRepo - HuggingFace repo string (optional)
+ * @param {string} options.filename - Model filename (for generating ID/name)
+ * @returns {object} - A preset object ready to save
+ */
+function createDefaultPreset({ modelPath, hfRepo, filename }) {
+  const source = hfRepo || filename || basename(modelPath || '');
+  const baseId = generatePresetId(source);
+  const id = ensureUniquePresetId(baseId);
+  const name = extractModelName(source);
+  
+  const preset = {
+    id,
+    name,
+    description: `Auto-generated preset for ${name}`,
+    modelPath: modelPath || null,
+    hfRepo: hfRepo || null,
+    context: 0,  // 0 means use server default
+    config: {
+      chatTemplateKwargs: '',
+      reasoningFormat: '',
+      temp: 0.7,
+      topP: 1.0,
+      topK: 20,
+      minP: 0,
+      extraSwitches: '--jinja'
+    },
+    autoGenerated: true,
+    createdAt: new Date().toISOString()
+  };
+  
+  return preset;
+}
+
+/**
+ * Auto-create a preset for a model file if one doesn't already exist.
+ * 
+ * @param {object} options - Configuration options
+ * @param {string} options.modelPath - Full path to the model file
+ * @param {string} options.hfRepo - HuggingFace repo string (optional)
+ * @param {string} options.filename - Model filename
+ * @returns {object|null} - The created preset, or null if already exists
+ */
+function autoCreatePreset({ modelPath, hfRepo, filename }) {
+  // Check if a preset already exists for this model
+  if (config.presets) {
+    for (const preset of Object.values(config.presets)) {
+      // Match by model path
+      if (modelPath && preset.modelPath === modelPath) {
+        console.log(`[presets] Preset already exists for ${filename}: ${preset.id}`);
+        return null;
+      }
+      // Match by hfRepo
+      if (hfRepo && preset.hfRepo === hfRepo) {
+        console.log(`[presets] Preset already exists for ${hfRepo}: ${preset.id}`);
+        return null;
+      }
+    }
+  }
+  
+  // Create new preset
+  const preset = createDefaultPreset({ modelPath, hfRepo, filename });
+  
+  // Save to config
+  if (!config.presets) {
+    config.presets = {};
+  }
+  config.presets[preset.id] = preset;
+  saveConfig(config);
+  
+  console.log(`[presets] Auto-created preset "${preset.id}" for ${filename}`);
+  addLog('presets', `Auto-created preset: ${preset.name} (${preset.id})`);
+  
+  return preset;
+}
+
+/**
+ * Migrate existing models to presets on server startup.
+ * Creates presets for any .gguf files that don't have one.
+ */
+function migrateExistingModels() {
+  const localModels = scanLocalModels();
+  let created = 0;
+  
+  for (const model of localModels) {
+    if (model.incomplete) continue;  // Skip incomplete split models
+    
+    const preset = autoCreatePreset({
+      modelPath: model.path,
+      filename: model.name
+    });
+    
+    if (preset) {
+      created++;
+    }
+  }
+  
+  if (created > 0) {
+    console.log(`[presets] Migration complete: created ${created} preset(s) for existing models`);
+    addLog('presets', `Migration: created ${created} preset(s) for existing models`);
+  }
 }
 
 // ============================================================================
@@ -2301,6 +2548,21 @@ app.post('/api/pull', async (req, res) => {
         if (flattened > 0) {
           addLog('download', `Flattened ${flattened} nested GGUF file(s)`);
         }
+        
+        // Auto-create presets for downloaded GGUF files
+        try {
+          const ggufFiles = readdirSync(targetDir).filter(f => f.endsWith('.gguf'));
+          for (const ggufFile of ggufFiles) {
+            const relativePath = join(basename(targetDir), ggufFile);
+            const preset = autoCreatePreset(relativePath);
+            if (preset) {
+              addLog('download', `Auto-created preset "${preset.id}" for ${ggufFile}`);
+            }
+          }
+        } catch (presetErr) {
+          console.error(`[download] Failed to auto-create presets: ${presetErr.message}`);
+        }
+        
         downloadInfo.status = 'completed';
         downloadInfo.progress = 100;
         addLog('download', `Download completed: ${repo}`);
