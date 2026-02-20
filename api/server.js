@@ -1078,7 +1078,235 @@ function scanLocalModels() {
   }));
 }
 
+// ============================================================================
+// Unified Model Configuration: Preset Resolution Layer
+// ============================================================================
+
+/**
+ * Resolve a model ID to a preset configuration or file path.
+ * 
+ * Resolution order:
+ * 1. Check if modelId matches a preset ID in config.presets
+ * 2. Fall back to file path lookup in MODELS_DIR (with deprecation warning)
+ * 3. Return null if not found
+ * 
+ * @param {string} modelId - The model identifier (preset ID or file path)
+ * @returns {object|null} - { type: 'preset', preset: {...} } or { type: 'file', path: '...' } or null
+ */
+function resolveModel(modelId) {
+  if (!modelId) return null;
+
+  // 1. Check if it's a preset ID
+  if (config.presets && config.presets[modelId]) {
+    const preset = config.presets[modelId];
+    console.log(`[resolveModel] Resolved "${modelId}" to preset: ${preset.name}`);
+    return { type: 'preset', preset };
+  }
+
+  // 2. Check for file path (backward compatibility)
+  const fullPath = modelId.startsWith('/') ? modelId : join(MODELS_DIR, modelId);
+  if (existsSync(fullPath) && fullPath.endsWith('.gguf')) {
+    console.log(`[resolveModel] DEPRECATION WARNING: Using file path "${modelId}" directly. Consider creating a preset for this model.`);
+    addLog('models', `DEPRECATION: Direct file path "${modelId}" used. Create a preset for better configuration.`);
+    return { type: 'file', path: fullPath, relativePath: modelId };
+  }
+
+  // 3. Check if a preset references this model path (reverse lookup)
+  if (config.presets) {
+    for (const preset of Object.values(config.presets)) {
+      const presetModelPath = preset.modelPath ? basename(preset.modelPath) : null;
+      if (presetModelPath && (modelId === presetModelPath || modelId.endsWith(presetModelPath))) {
+        console.log(`[resolveModel] Resolved file path "${modelId}" to preset: ${preset.id}`);
+        return { type: 'preset', preset };
+      }
+    }
+  }
+
+  console.log(`[resolveModel] Model "${modelId}" not found`);
+  return null;
+}
+
+/**
+ * Get the model path to use for llama.cpp from a resolved model.
+ * For presets with hfRepo, returns the expected download path.
+ * For presets with modelPath, returns the relative path.
+ * For file paths, returns as-is.
+ * 
+ * @param {object} resolved - Result from resolveModel()
+ * @returns {string|null} - The model path for llama.cpp
+ */
+function resolveModelPath(resolved) {
+  if (!resolved) return null;
+
+  if (resolved.type === 'file') {
+    return resolved.relativePath;
+  }
+
+  if (resolved.type === 'preset') {
+    const preset = resolved.preset;
+    
+    // If preset has a direct model path, use it
+    if (preset.modelPath) {
+      // Return relative path for llama.cpp router mode
+      if (preset.modelPath.startsWith(MODELS_DIR)) {
+        return preset.modelPath.replace(MODELS_DIR + '/', '');
+      }
+      return preset.modelPath;
+    }
+
+    // If preset uses hfRepo, construct expected download path
+    if (preset.hfRepo) {
+      // hfRepo format: "org/repo:quantization" or "org/repo"
+      const [repoPath, quant] = preset.hfRepo.split(':');
+      const repoDir = repoPath.replace('/', '_');
+      
+      // Scan for matching file in the download directory
+      const downloadDir = join(MODELS_DIR, repoDir);
+      if (existsSync(downloadDir)) {
+        const files = readdirSync(downloadDir).filter(f => f.endsWith('.gguf'));
+        if (quant) {
+          // Find file matching quantization
+          const quantUpper = quant.toUpperCase();
+          const match = files.find(f => f.toUpperCase().includes(quantUpper));
+          if (match) return `${repoDir}/${match}`;
+        }
+        // Return first gguf file found
+        if (files.length > 0) return `${repoDir}/${files[0]}`;
+      }
+    }
+
+    return null;
+  }
+
+  return null;
+}
+
+/**
+ * Check if a preset's model is currently loaded in llama.cpp.
+ * 
+ * @param {object} preset - The preset configuration
+ * @param {Array} serverModels - Array of models from llama.cpp /models endpoint
+ * @returns {string} - 'loaded', 'loading', or 'available'
+ */
+function getPresetStatus(preset, serverModels) {
+  if (!preset || !serverModels || serverModels.length === 0) {
+    return 'available';
+  }
+
+  // Get the model path that would be used for this preset
+  const resolved = { type: 'preset', preset };
+  const modelPath = resolveModelPath(resolved);
+  
+  if (!modelPath) {
+    // Model not downloaded yet
+    return 'not_downloaded';
+  }
+
+  // Check if any loaded model matches this path
+  for (const model of serverModels) {
+    const modelId = model.id || '';
+    const status = model.status?.value || 'unknown';
+    
+    // Match by path (could be full path or relative)
+    if (modelId === modelPath || 
+        modelId.endsWith(modelPath) || 
+        modelPath.endsWith(modelId) ||
+        basename(modelId) === basename(modelPath)) {
+      if (status === 'loaded') return 'loaded';
+      if (status === 'loading') return 'loading';
+    }
+  }
+
+  return 'available';
+}
+
+/**
+ * Apply preset configuration to a request body.
+ * Injects sampling parameters, chat_template_kwargs, etc.
+ * 
+ * @param {object} body - The original request body
+ * @param {object} preset - The preset configuration
+ * @returns {object} - Modified request body with preset params applied
+ */
+function applyPresetToRequest(body, preset) {
+  if (!preset || !preset.config) return body;
+
+  const result = { ...body };
+
+  // Apply sampling parameters if not already set in request
+  if (preset.config.temp !== undefined && result.temperature === undefined) {
+    result.temperature = preset.config.temp;
+  }
+  if (preset.config.topP !== undefined && result.top_p === undefined) {
+    result.top_p = preset.config.topP;
+  }
+  if (preset.config.topK !== undefined && result.top_k === undefined) {
+    result.top_k = preset.config.topK;
+  }
+  if (preset.config.minP !== undefined && result.min_p === undefined) {
+    result.min_p = preset.config.minP;
+  }
+
+  // Apply chat_template_kwargs if preset has them configured
+  if (preset.config.chatTemplateKwargs) {
+    try {
+      const presetKwargs = typeof preset.config.chatTemplateKwargs === 'string' 
+        ? JSON.parse(preset.config.chatTemplateKwargs)
+        : preset.config.chatTemplateKwargs;
+      
+      result.chat_template_kwargs = {
+        ...presetKwargs,
+        ...result.chat_template_kwargs  // Request values take precedence
+      };
+    } catch (e) {
+      console.error(`[applyPresetToRequest] Failed to parse chatTemplateKwargs: ${e.message}`);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Resolve model ID and prepare request body for proxying to llama.cpp.
+ * This is the main helper function used by all proxy endpoints.
+ * 
+ * @param {object} body - The original request body
+ * @returns {object} - { body: modifiedBody, resolved: resolvedModel, modelPath: string }
+ */
+function prepareProxyRequest(body) {
+  const modelId = body.model;
+  const resolved = resolveModel(modelId);
+  
+  if (!resolved) {
+    // Model not found, return as-is and let llama.cpp handle the error
+    return { body, resolved: null, modelPath: modelId };
+  }
+
+  let modifiedBody = { ...body };
+  let modelPath = modelId;
+
+  if (resolved.type === 'preset') {
+    // Resolve the actual model path for llama.cpp
+    modelPath = resolveModelPath(resolved);
+    if (modelPath) {
+      modifiedBody.model = modelPath;
+    }
+
+    // Apply preset configuration to request
+    modifiedBody = applyPresetToRequest(modifiedBody, resolved.preset);
+
+    console.log(`[prepareProxyRequest] Preset "${resolved.preset.id}" -> model "${modelPath}"`);
+  } else if (resolved.type === 'file') {
+    modelPath = resolved.relativePath;
+    modifiedBody.model = modelPath;
+  }
+
+  return { body: modifiedBody, resolved, modelPath };
+}
+
+// ============================================================================
 // API Routes
+// ============================================================================
 
 // Get settings
 app.get('/api/settings', (req, res) => {
@@ -1272,6 +1500,7 @@ app.delete('/api/models/aliases/:modelName(*)', (req, res) => {
 });
 
 // Get models from llama-server (loaded/available)
+// Returns presets as the primary model list, with status information
 app.get('/api/models', async (req, res) => {
   try {
     // Get models from llama-server
@@ -1289,10 +1518,35 @@ app.get('/api/models', async (req, res) => {
     // Get local models from filesystem
     const localModels = scanLocalModels();
 
+    // Build presets list with status information
+    // This is the primary model list for unified model configuration
+    const presets = config.presets ? Object.values(config.presets).map(preset => {
+      const status = getPresetStatus(preset, serverModels);
+      const modelPath = resolveModelPath({ type: 'preset', preset });
+      
+      return {
+        id: preset.id,
+        name: preset.name,
+        description: preset.description || '',
+        modelPath: preset.modelPath || null,
+        hfRepo: preset.hfRepo || null,
+        context: preset.context || 0,
+        config: preset.config || {},
+        status,  // 'loaded' | 'loading' | 'available' | 'not_downloaded'
+        resolvedPath: modelPath  // The actual path used for llama.cpp
+      };
+    }) : [];
+
     res.json({
+      // Primary model list: presets with status
+      models: presets,
+      // Keep for backward compatibility during transition
       serverModels,
       localModels,
-      modelsDir: MODELS_DIR
+      modelsDir: MODELS_DIR,
+      // Current mode info
+      mode: currentMode,
+      currentPreset: currentPreset
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1302,6 +1556,7 @@ app.get('/api/models', async (req, res) => {
 // Load a model in llama-server (router mode)
 // In router mode, models are loaded on-demand when chat completions are requested.
 // This endpoint pre-loads a model by making a minimal completion request.
+// Accepts both preset IDs and file paths (backward compatible)
 app.post('/api/models/load', async (req, res) => {
   const { model } = req.body;
 
@@ -1309,17 +1564,43 @@ app.post('/api/models/load', async (req, res) => {
     return res.status(400).json({ error: 'Missing model parameter' });
   }
 
-  // Resolve model name to full path to verify it exists
-  const modelPath = join(MODELS_DIR, model);
   console.log(`[models/load] Attempting to load model: ${model}`);
-  console.log(`[models/load] Full path: ${modelPath}`);
-  addLog('models', `Loading model: ${model} (${modelPath})`);
 
-  // Verify model exists
-  if (!existsSync(modelPath)) {
-    console.error(`[models/load] Model file not found: ${modelPath}`);
-    addLog('models', `Model file not found: ${modelPath}`);
-    return res.status(404).json({ error: `Model file not found: ${model}` });
+  // Use unified model resolution
+  const resolved = resolveModel(model);
+  let modelPathForLlama = model;
+  let displayName = model;
+
+  if (resolved) {
+    if (resolved.type === 'preset') {
+      const presetModelPath = resolveModelPath(resolved);
+      if (!presetModelPath) {
+        // Model not downloaded yet
+        return res.status(404).json({ 
+          error: `Preset "${model}" references a model that is not downloaded yet.`,
+          preset: resolved.preset.id,
+          hfRepo: resolved.preset.hfRepo
+        });
+      }
+      modelPathForLlama = presetModelPath;
+      displayName = resolved.preset.name;
+      console.log(`[models/load] Resolved preset "${model}" to path: ${modelPathForLlama}`);
+      addLog('models', `Loading preset: ${resolved.preset.name} (${modelPathForLlama})`);
+    } else if (resolved.type === 'file') {
+      modelPathForLlama = resolved.relativePath;
+      console.log(`[models/load] Using file path: ${modelPathForLlama}`);
+      addLog('models', `Loading model file: ${modelPathForLlama}`);
+    }
+  } else {
+    // Not found in presets, try as direct file path (backward compat)
+    const fullPath = join(MODELS_DIR, model);
+    if (!existsSync(fullPath)) {
+      console.error(`[models/load] Model not found: ${model}`);
+      addLog('models', `Model not found: ${model}`);
+      return res.status(404).json({ error: `Model not found: ${model}. Check preset ID or file path.` });
+    }
+    console.log(`[models/load] Using direct file path: ${model}`);
+    addLog('models', `Loading model: ${model}`);
   }
 
   try {
@@ -1329,7 +1610,7 @@ app.post('/api/models/load', async (req, res) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: model,
+        model: modelPathForLlama,
         messages: [{ role: 'user', content: 'hi' }],
         max_tokens: 1
       })
@@ -1345,9 +1626,14 @@ app.post('/api/models/load', async (req, res) => {
     // Consume the response
     await response.text();
 
-    console.log(`[models/load] Model loaded successfully: ${model}`);
-    addLog('models', `Model loaded: ${model}`);
-    res.json({ success: true, model });
+    console.log(`[models/load] Model loaded successfully: ${displayName}`);
+    addLog('models', `Model loaded: ${displayName}`);
+    res.json({ 
+      success: true, 
+      model: modelPathForLlama,
+      preset: resolved?.type === 'preset' ? resolved.preset.id : null,
+      displayName
+    });
   } catch (error) {
     console.error(`[models/load] Error: ${error.message}`);
     addLog('models', `Error loading model: ${error.message}`);
@@ -2881,6 +3167,7 @@ function injectReasoningEffort(body) {
 }
 
 // OpenAI-compatible chat completions (streaming and non-streaming)
+// Supports preset IDs and file paths as model identifiers
 app.post('/api/v1/chat/completions', async (req, res) => {
   const startTime = Date.now();
   const isStreaming = req.body.stream === true;
@@ -2888,8 +3175,17 @@ app.post('/api/v1/chat/completions', async (req, res) => {
 
   console.log(`[chat/completions] Request for model: ${requestedModel}`);
 
-  // Inject reasoning_effort if configured (shallow copy preserves req.body for logs)
-  const proxyBody = injectReasoningEffort(req.body);
+  // Resolve preset ID to model path and apply preset configuration
+  const { body: resolvedBody, resolved, modelPath } = prepareProxyRequest(req.body);
+  
+  // Inject reasoning_effort if configured (after preset resolution)
+  const proxyBody = injectReasoningEffort(resolvedBody);
+
+  // Log preset resolution for debugging
+  if (resolved?.type === 'preset') {
+    console.log(`[chat/completions] Preset "${resolved.preset.id}" resolved to "${modelPath}"`);
+    addLog('chat', `Using preset: ${resolved.preset.name}`);
+  }
 
   async function doFetch(body) {
     return fetchWithRetry(`http://localhost:${LLAMA_PORT}/v1/chat/completions`, {
@@ -3097,16 +3393,25 @@ app.post('/api/v1/chat/completions', async (req, res) => {
 });
 
 // OpenAI-compatible completions (legacy endpoint)
+// Supports preset IDs and file paths as model identifiers
 app.post('/api/v1/completions', async (req, res) => {
   const startTime = Date.now();
   const requestedModel = req.body.model || 'unknown';
   const isStreaming = req.body.stream === true;
 
+  // Resolve preset ID to model path and apply preset configuration
+  const { body: proxyBody, resolved, modelPath } = prepareProxyRequest(req.body);
+
+  // Log preset resolution for debugging
+  if (resolved?.type === 'preset') {
+    console.log(`[completions] Preset "${resolved.preset.id}" resolved to "${modelPath}"`);
+  }
+
   try {
     const response = await fetchWithRetry(`http://localhost:${LLAMA_PORT}/v1/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body)
+      body: JSON.stringify(proxyBody)
     }, { label: 'completions' });
 
     if (!response.ok) {
@@ -3215,12 +3520,21 @@ app.post('/api/v1/completions', async (req, res) => {
 });
 
 // OpenAI-compatible embeddings endpoint
+// Supports preset IDs and file paths as model identifiers
 app.post('/api/v1/embeddings', async (req, res) => {
+  // Resolve preset ID to model path
+  const { body: proxyBody, resolved, modelPath } = prepareProxyRequest(req.body);
+
+  // Log preset resolution for debugging
+  if (resolved?.type === 'preset') {
+    console.log(`[embeddings] Preset "${resolved.preset.id}" resolved to "${modelPath}"`);
+  }
+
   try {
     const response = await fetch(`http://localhost:${LLAMA_PORT}/v1/embeddings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body)
+      body: JSON.stringify(proxyBody)
     });
 
     if (!response.ok) {
@@ -3273,6 +3587,7 @@ app.get('/api/v1/models/:model', async (req, res) => {
 });
 
 // OpenAI Responses API (proxied to llama.cpp)
+// Supports preset IDs and file paths as model identifiers
 app.post('/api/v1/responses', async (req, res) => {
   const startTime = Date.now();
   const isStreaming = req.body.stream === true;
@@ -3280,8 +3595,17 @@ app.post('/api/v1/responses', async (req, res) => {
 
   console.log(`[responses] Request for model: ${requestedModel}`);
 
-  // Inject reasoning_effort if configured
-  const proxyBody = injectReasoningEffort(req.body);
+  // Resolve preset ID to model path and apply preset configuration
+  const { body: resolvedBody, resolved, modelPath } = prepareProxyRequest(req.body);
+
+  // Log preset resolution for debugging
+  if (resolved?.type === 'preset') {
+    console.log(`[responses] Preset "${resolved.preset.id}" resolved to "${modelPath}"`);
+    addLog('responses', `Using preset: ${resolved.preset.name}`);
+  }
+
+  // Inject reasoning_effort if configured (after preset resolution)
+  const proxyBody = injectReasoningEffort(resolvedBody);
 
   try {
     let response = await fetchWithRetry(`http://localhost:${LLAMA_PORT}/v1/responses`, {
@@ -3436,6 +3760,7 @@ app.post('/api/v1/responses', async (req, res) => {
 });
 
 // Anthropic Messages API compatibility (proxied to llama.cpp)
+// Supports preset IDs and file paths as model identifiers
 app.post('/api/v1/messages', async (req, res) => {
   const startTime = Date.now();
   const isStreaming = req.body.stream === true;
@@ -3443,8 +3768,17 @@ app.post('/api/v1/messages', async (req, res) => {
 
   console.log(`[messages] Request for model: ${requestedModel}`);
 
-  // Inject reasoning_effort if configured
-  const proxyBody = injectReasoningEffort(req.body);
+  // Resolve preset ID to model path and apply preset configuration
+  const { body: resolvedBody, resolved, modelPath } = prepareProxyRequest(req.body);
+
+  // Log preset resolution for debugging
+  if (resolved?.type === 'preset') {
+    console.log(`[messages] Preset "${resolved.preset.id}" resolved to "${modelPath}"`);
+    addLog('messages', `Using preset: ${resolved.preset.name}`);
+  }
+
+  // Inject reasoning_effort if configured (after preset resolution)
+  const proxyBody = injectReasoningEffort(resolvedBody);
 
   try {
     let response = await fetchWithRetry(`http://localhost:${LLAMA_PORT}/v1/messages`, {
