@@ -151,6 +151,20 @@ let downloadProcesses = new Map();
 let currentMode = 'router'; // 'router' or 'single'
 let currentPreset = null;
 
+// Track current llama-server configuration for compatibility checks
+// Updated when server starts in router or preset mode
+let serverConfig = {
+  context: 8192,        // Context window size (-c)
+  gpuLayers: 99,        // GPU layers for offloading (-ngl)
+  flashAttn: false,     // Flash attention enabled (--flash-attn)
+  modelsMax: 2,         // Max models for router mode (--model-slot)
+  reasoningFormat: null, // Reasoning format (--reasoning-format)
+  extraSwitches: '--jinja' // Additional llama-server switches
+};
+
+// Mutex to prevent concurrent server restarts
+let serverRestartLock = false;
+
 // Analytics data storage (circular buffers for time-series data)
 const MAX_ANALYTICS_POINTS = 300; // 5 minutes at 1 second intervals
 const analyticsData = {
@@ -1308,6 +1322,239 @@ function prepareProxyRequest(body) {
 }
 
 // ============================================================================
+// Server Compatibility and Smart Restart
+// ============================================================================
+
+/**
+ * Check if a preset can be served with the current llama-server configuration.
+ * Returns true if the preset is compatible (no restart needed), false otherwise.
+ * 
+ * @param {object} preset - The preset configuration
+ * @returns {object} - { compatible: boolean, reasons: string[] }
+ */
+function isCompatible(preset) {
+  const reasons = [];
+  
+  if (!preset || !preset.config) {
+    // No preset config means it can use defaults - compatible
+    return { compatible: true, reasons: [] };
+  }
+  
+  const presetConfig = preset.config;
+  
+  // Context: preset can use less than or equal to current context
+  if (presetConfig.context && presetConfig.context > serverConfig.context) {
+    reasons.push(`Context ${presetConfig.context} > current ${serverConfig.context}`);
+  }
+  
+  // GPU layers: must match if specified (affects VRAM allocation)
+  if (presetConfig.gpuLayers !== undefined && 
+      presetConfig.gpuLayers !== serverConfig.gpuLayers) {
+    reasons.push(`GPU layers ${presetConfig.gpuLayers} != current ${serverConfig.gpuLayers}`);
+  }
+  
+  // Flash attention: must match if server was started with/without it
+  if (presetConfig.flashAttn !== undefined && 
+      presetConfig.flashAttn !== serverConfig.flashAttn) {
+    reasons.push(`Flash attention ${presetConfig.flashAttn} != current ${serverConfig.flashAttn}`);
+  }
+  
+  // Reasoning format: requires restart if different
+  if (presetConfig.reasoningFormat && 
+      presetConfig.reasoningFormat !== serverConfig.reasoningFormat) {
+    reasons.push(`Reasoning format "${presetConfig.reasoningFormat}" != current "${serverConfig.reasoningFormat || 'none'}"`);
+  }
+  
+  return {
+    compatible: reasons.length === 0,
+    reasons
+  };
+}
+
+/**
+ * Wait for llama-server to become healthy after restart.
+ * 
+ * @param {number} timeoutMs - Maximum time to wait in milliseconds
+ * @returns {Promise<boolean>} - true if server is healthy, false if timeout
+ */
+async function waitForServerHealth(timeoutMs = 30000) {
+  const startTime = Date.now();
+  const checkInterval = 500;
+  
+  while (Date.now() - startTime < timeoutMs) {
+    try {
+      const response = await fetch(`${LLAMA_SERVER_URL}/health`);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.status === 'ok' || data.status === 'no slot available') {
+          return true;
+        }
+      }
+    } catch {
+      // Server not ready yet
+    }
+    await new Promise(resolve => setTimeout(resolve, checkInterval));
+  }
+  
+  return false;
+}
+
+/**
+ * Restart llama-server with new configuration for a preset.
+ * Uses a mutex to prevent concurrent restarts.
+ * 
+ * @param {object} preset - The preset requiring the restart
+ * @returns {Promise<object>} - { success: boolean, error?: string }
+ */
+async function restartForPreset(preset) {
+  // Check mutex
+  if (serverRestartLock) {
+    console.log('[restartForPreset] Restart already in progress, waiting...');
+    // Wait for current restart to complete (poll every 500ms, max 60s)
+    const waitStart = Date.now();
+    while (serverRestartLock && Date.now() - waitStart < 60000) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    if (serverRestartLock) {
+      return { success: false, error: 'Timeout waiting for concurrent restart' };
+    }
+    // Restart completed, check if we're now compatible
+    const compat = isCompatible(preset);
+    if (compat.compatible) {
+      return { success: true };
+    }
+  }
+  
+  // Acquire mutex
+  serverRestartLock = true;
+  
+  try {
+    const presetConfig = preset.config || {};
+    console.log(`[restartForPreset] Restarting server for preset "${preset.id}"`);
+    addLog('server', `Restarting llama-server for preset "${preset.id}"`);
+    
+    // Stop current server
+    if (llamaProcess) {
+      console.log('[restartForPreset] Stopping current llama-server...');
+      llamaProcess.kill('SIGTERM');
+      
+      // Wait for process to exit (max 10 seconds)
+      const stopStart = Date.now();
+      while (llamaProcess && Date.now() - stopStart < 10000) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      
+      if (llamaProcess) {
+        console.log('[restartForPreset] Force killing llama-server...');
+        llamaProcess.kill('SIGKILL');
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+    
+    // Update serverConfig with new values
+    const newContext = presetConfig.context || config.defaultContext || 8192;
+    const newGpuLayers = presetConfig.gpuLayers !== undefined ? presetConfig.gpuLayers : (config.gpuLayers || 99);
+    const newFlashAttn = presetConfig.flashAttn !== undefined ? presetConfig.flashAttn : (config.flashAttn || false);
+    const newReasoningFormat = presetConfig.reasoningFormat || null;
+    
+    serverConfig.context = newContext;
+    serverConfig.gpuLayers = newGpuLayers;
+    serverConfig.flashAttn = newFlashAttn;
+    serverConfig.reasoningFormat = newReasoningFormat;
+    
+    // Build llama-server arguments
+    const args = [
+      '--host', '0.0.0.0',
+      '--port', LLAMA_PORT.toString(),
+      '--model-store', MODELS_DIR,
+      '--ctx-size', newContext.toString(),
+      '--gpu-layers', newGpuLayers.toString(),
+      '--jinja'
+    ];
+    
+    if (newFlashAttn) {
+      args.push('--flash-attn');
+    }
+    
+    if (newReasoningFormat) {
+      args.push('--reasoning-format', newReasoningFormat);
+    }
+    
+    // Add extra switches from config
+    if (config.extraSwitches) {
+      const extras = config.extraSwitches.split(' ').filter(s => s.trim());
+      args.push(...extras);
+    }
+    
+    // Get the model path to load
+    const modelPath = resolveModelPath({ type: 'preset', preset });
+    if (modelPath) {
+      args.push('--model', join(MODELS_DIR, modelPath));
+      currentMode = 'single';
+      currentPreset = preset.id;
+    } else {
+      // Fall back to router mode if no specific model
+      args.push('--model-slot', (config.modelsMax || 2).toString());
+      currentMode = 'router';
+      currentPreset = null;
+    }
+    
+    console.log(`[restartForPreset] Starting llama-server with args: ${args.join(' ')}`);
+    addLog('server', `Starting llama-server: ${LLAMA_SERVER_PATH} ${args.slice(0, 6).join(' ')}...`);
+    
+    // Start the server
+    const { spawn } = await import('child_process');
+    llamaProcess = spawn(LLAMA_SERVER_PATH, args, {
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    
+    llamaProcess.stdout.on('data', (data) => {
+      const line = data.toString().trim();
+      if (line) {
+        console.log(`[llama-server] ${line}`);
+      }
+    });
+    
+    llamaProcess.stderr.on('data', (data) => {
+      const line = data.toString().trim();
+      if (line) {
+        console.error(`[llama-server] ${line}`);
+      }
+    });
+    
+    llamaProcess.on('exit', (code, signal) => {
+      console.log(`[llama-server] Process exited with code ${code}, signal ${signal}`);
+      llamaProcess = null;
+    });
+    
+    // Wait for server to be healthy
+    console.log('[restartForPreset] Waiting for server to become healthy...');
+    const healthy = await waitForServerHealth(60000);
+    
+    if (!healthy) {
+      console.error('[restartForPreset] Server failed to become healthy');
+      addLog('server', 'Server restart failed: health check timeout');
+      return { success: false, error: 'Server health check timeout' };
+    }
+    
+    console.log(`[restartForPreset] Server restarted successfully for preset "${preset.id}"`);
+    addLog('server', `Server restarted successfully for preset "${preset.id}"`);
+    
+    return { success: true };
+    
+  } catch (err) {
+    console.error(`[restartForPreset] Error: ${err.message}`);
+    addLog('server', `Server restart error: ${err.message}`);
+    return { success: false, error: err.message };
+    
+  } finally {
+    // Release mutex
+    serverRestartLock = false;
+  }
+}
+
+// ============================================================================
 // Auto-Preset Creation: Generate presets for downloaded models
 // ============================================================================
 
@@ -2134,15 +2381,20 @@ app.post('/api/server/start', async (req, res) => {
     currentPreset = null;
 
     const startScript = join(PROJECT_ROOT, 'start-llama.sh');
+    const contextSize = config.contextSize || 8192;
+    const gpuLayers = config.gpuLayers || 99;
+    const flashAttn = config.flashAttn || false;
+    const modelsMax = config.modelsMax || 2;
+    
     const env = {
       ...process.env,
       MODELS_DIR,
-      MODELS_MAX: String(config.modelsMax || 2),
-      CONTEXT: String(config.contextSize || 8192),
+      MODELS_MAX: String(modelsMax),
+      CONTEXT: String(contextSize),
       PORT: String(LLAMA_PORT),
       NO_WARMUP: config.noWarmup ? '1' : '',
-      FLASH_ATTN: config.flashAttn ? '1' : '',
-      GPU_LAYERS: String(config.gpuLayers || 99),
+      FLASH_ATTN: flashAttn ? '1' : '',
+      GPU_LAYERS: String(gpuLayers),
       HF_TOKEN: process.env.HF_TOKEN || ''
     };
 
@@ -2163,6 +2415,15 @@ app.post('/api/server/start', async (req, res) => {
     llamaProcess.on('exit', (code) => {
       addLog('system', `llama-server exited with code ${code}`);
     });
+
+    // Record server configuration for compatibility checks
+    serverConfig.context = contextSize;
+    serverConfig.gpuLayers = gpuLayers;
+    serverConfig.flashAttn = flashAttn;
+    serverConfig.modelsMax = modelsMax;
+    serverConfig.reasoningFormat = null;
+    serverConfig.extraSwitches = '--jinja';
+    console.log(`[server/start] Router mode: context=${contextSize}, gpuLayers=${gpuLayers}, flashAttn=${flashAttn}`);
 
     res.json({ success: true, mode: 'router', pid: llamaProcess.pid });
   } catch (error) {
@@ -2232,6 +2493,21 @@ app.post('/api/presets/:presetId/activate', async (req, res) => {
         currentPreset = null;
       }
     });
+
+    // Record server configuration for compatibility checks
+    const presetContext = preset.context || config.contextSize || 8192;
+    const presetGpuLayers = preset.config?.gpuLayers !== undefined ? preset.config.gpuLayers : (config.gpuLayers || 99);
+    const presetFlashAttn = preset.config?.flashAttn !== undefined ? preset.config.flashAttn : (config.flashAttn || false);
+    const presetReasoningFormat = preset.config?.reasoningFormat || null;
+    const presetExtraSwitches = preset.config?.extraSwitches || '--jinja';
+    
+    serverConfig.context = presetContext;
+    serverConfig.gpuLayers = presetGpuLayers;
+    serverConfig.flashAttn = presetFlashAttn;
+    serverConfig.modelsMax = 1; // Single model mode
+    serverConfig.reasoningFormat = presetReasoningFormat;
+    serverConfig.extraSwitches = presetExtraSwitches;
+    console.log(`[presets/activate] Preset mode: context=${presetContext}, gpuLayers=${presetGpuLayers}, flashAttn=${presetFlashAttn}`);
 
     res.json({
       success: true,
@@ -3440,6 +3716,27 @@ app.post('/api/v1/chat/completions', async (req, res) => {
   // Resolve preset ID to model path and apply preset configuration
   const { body: resolvedBody, resolved, modelPath } = prepareProxyRequest(req.body);
   
+  // Check if preset requires server restart due to incompatible config
+  if (resolved?.type === 'preset') {
+    const compat = isCompatible(resolved.preset);
+    if (!compat.compatible) {
+      console.log(`[chat/completions] Preset "${resolved.preset.id}" incompatible: ${compat.reasons.join(', ')}`);
+      addLog('chat', `Restarting server for preset "${resolved.preset.id}": ${compat.reasons.join(', ')}`);
+      
+      const restartResult = await restartForPreset(resolved.preset);
+      if (!restartResult.success) {
+        console.error(`[chat/completions] Server restart failed: ${restartResult.error}`);
+        return res.status(503).json({
+          error: {
+            message: `Server restart failed: ${restartResult.error}`,
+            type: 'server_error',
+            code: 'restart_failed'
+          }
+        });
+      }
+    }
+  }
+  
   // Inject reasoning_effort if configured (after preset resolution)
   const proxyBody = injectReasoningEffort(resolvedBody);
 
@@ -3664,6 +3961,20 @@ app.post('/api/v1/completions', async (req, res) => {
   // Resolve preset ID to model path and apply preset configuration
   const { body: proxyBody, resolved, modelPath } = prepareProxyRequest(req.body);
 
+  // Check if preset requires server restart due to incompatible config
+  if (resolved?.type === 'preset') {
+    const compat = isCompatible(resolved.preset);
+    if (!compat.compatible) {
+      console.log(`[completions] Preset "${resolved.preset.id}" incompatible: ${compat.reasons.join(', ')}`);
+      const restartResult = await restartForPreset(resolved.preset);
+      if (!restartResult.success) {
+        return res.status(503).json({
+          error: { message: `Server restart failed: ${restartResult.error}`, type: 'server_error', code: 'restart_failed' }
+        });
+      }
+    }
+  }
+
   // Log preset resolution for debugging
   if (resolved?.type === 'preset') {
     console.log(`[completions] Preset "${resolved.preset.id}" resolved to "${modelPath}"`);
@@ -3787,6 +4098,20 @@ app.post('/api/v1/embeddings', async (req, res) => {
   // Resolve preset ID to model path
   const { body: proxyBody, resolved, modelPath } = prepareProxyRequest(req.body);
 
+  // Check if preset requires server restart due to incompatible config
+  if (resolved?.type === 'preset') {
+    const compat = isCompatible(resolved.preset);
+    if (!compat.compatible) {
+      console.log(`[embeddings] Preset "${resolved.preset.id}" incompatible: ${compat.reasons.join(', ')}`);
+      const restartResult = await restartForPreset(resolved.preset);
+      if (!restartResult.success) {
+        return res.status(503).json({
+          error: { message: `Server restart failed: ${restartResult.error}`, type: 'server_error', code: 'restart_failed' }
+        });
+      }
+    }
+  }
+
   // Log preset resolution for debugging
   if (resolved?.type === 'preset') {
     console.log(`[embeddings] Preset "${resolved.preset.id}" resolved to "${modelPath}"`);
@@ -3859,6 +4184,22 @@ app.post('/api/v1/responses', async (req, res) => {
 
   // Resolve preset ID to model path and apply preset configuration
   const { body: resolvedBody, resolved, modelPath } = prepareProxyRequest(req.body);
+
+  // Check if preset requires server restart due to incompatible config
+  if (resolved?.type === 'preset') {
+    const compat = isCompatible(resolved.preset);
+    if (!compat.compatible) {
+      console.log(`[responses] Preset "${resolved.preset.id}" incompatible: ${compat.reasons.join(', ')}`);
+      addLog('responses', `Restarting server for preset "${resolved.preset.id}": ${compat.reasons.join(', ')}`);
+      
+      const restartResult = await restartForPreset(resolved.preset);
+      if (!restartResult.success) {
+        return res.status(503).json({
+          error: { message: `Server restart failed: ${restartResult.error}`, type: 'server_error', code: 'restart_failed' }
+        });
+      }
+    }
+  }
 
   // Log preset resolution for debugging
   if (resolved?.type === 'preset') {
@@ -4032,6 +4373,22 @@ app.post('/api/v1/messages', async (req, res) => {
 
   // Resolve preset ID to model path and apply preset configuration
   const { body: resolvedBody, resolved, modelPath } = prepareProxyRequest(req.body);
+
+  // Check if preset requires server restart due to incompatible config
+  if (resolved?.type === 'preset') {
+    const compat = isCompatible(resolved.preset);
+    if (!compat.compatible) {
+      console.log(`[messages] Preset "${resolved.preset.id}" incompatible: ${compat.reasons.join(', ')}`);
+      addLog('messages', `Restarting server for preset "${resolved.preset.id}": ${compat.reasons.join(', ')}`);
+      
+      const restartResult = await restartForPreset(resolved.preset);
+      if (!restartResult.success) {
+        return res.status(503).json({
+          error: { message: `Server restart failed: ${restartResult.error}`, type: 'server_error', code: 'restart_failed' }
+        });
+      }
+    }
+  }
 
   // Log preset resolution for debugging
   if (resolved?.type === 'preset') {
